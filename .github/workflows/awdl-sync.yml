@@ -9,6 +9,10 @@ name: AWDL - rebuild fork onto upstream
 on:
   push:
     branches: [awdl-tooling]
+    # Only a change to the porting scripts should rebuild and force-push the
+    # branch; editing a workflow file must not move the branch under review.
+    paths:
+      - .github/awdl/**
   workflow_dispatch:
     inputs:
       upstream_ref:

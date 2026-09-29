@@ -1,0 +1,76 @@
+name: AWDL - compile check
+
+# The AWDL branch is upstream's tree with the fork's work re-applied on top, so
+# it conflicts with the fork's old main: GitHub cannot create a merge commit for
+# the pull request, and a pull_request-triggered Tests run therefore never
+# starts. This runs the same three checks upstream's tests.yml runs, against the
+# branch's own ref.
+#
+# Re-run it by touching this file, or from the Actions tab once it has reached
+# the default branch.
+
+on:
+  push:
+    branches: [awdl-tooling]
+    paths:
+      - .github/workflows/awdl-build.yml
+  workflow_dispatch:
+    inputs:
+      target_ref:
+        description: "ref to compile"
+        default: feat/awdl-v1.22.0
+
+concurrency:
+  group: awdl-build
+  cancel-in-progress: true
+
+jobs:
+  mac:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.target_ref || 'feat/awdl-v1.22.0' }}
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      # Deliberately without DEVELOPMENT_TEAM: nothing built here is
+      # distributed, so an unsigned build is enough and no secrets are needed.
+      - name: Generate project
+        run: xcodegen generate
+
+      - name: Run macOS tests
+        run: |
+          xcodebuild test \
+            -project OpenSidecar.xcodeproj \
+            -scheme OpenSidecarMac \
+            -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      # Lower deployment target than the sender (issue #241): this is what
+      # catches a too-new API sneaking into Shared/.
+      - name: Build macOS receiver app
+        run: |
+          xcodebuild build \
+            -project OpenSidecar.xcodeproj \
+            -scheme OpenSidecarMacReceiver \
+            -destination 'platform=macOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
+
+      # The device side of the port: this compiles the re-applied
+      # Shared/StreamReceiver.swift and Shared/PeerToPeerWiFi.swift for iOS.
+      - name: Build iOS and iPadOS receiver app
+        run: |
+          xcodebuild build \
+            -project OpenSidecar.xcodeproj \
+            -scheme OpenSidecariOS \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY=""
