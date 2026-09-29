@@ -32,6 +32,18 @@ jobs:
         with:
           ref: ${{ inputs.target_ref || 'feat/awdl-v1.22.0' }}
 
+      # This branch compiles even without the port, so record which commit was
+      # built and fail loudly if it is not the ported tree.
+      - name: Identify the tree under test
+        run: |
+          set -euo pipefail
+          echo "HEAD = $(git rev-parse HEAD)"
+          git --no-pager log -1 --oneline
+          test -f Shared/PeerToPeerWiFi.swift
+          test -f Shared/StreamReceiver.swift
+          grep -q "includePeerToPeer" Shared/StreamReceiver.swift
+          echo "AWDL port present"
+
       - name: Install XcodeGen
         run: brew install xcodegen
 
