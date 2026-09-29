@@ -1,0 +1,68 @@
+name: AWDL - rebuild fork onto upstream
+
+# The fork's AWDL work sat on upstream v1.16.0 while upstream reached v1.22.0
+# and moved the iOS receiver into Shared/StreamReceiver.swift, so a plain
+# merge conflicts. This job rebuilds the work from scratch on top of any
+# upstream ref: check out upstream, run the porting scripts, push the result.
+# Re-runnable for every future upstream release.
+
+on:
+  push:
+    branches: [awdl-tooling]
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "upstream ref to rebuild onto"
+        default: main
+      target_branch:
+        description: "branch to create in this fork"
+        default: feat/awdl-v1.22.0
+
+permissions:
+  contents: write
+
+jobs:
+  rebuild:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the tooling (scripts + this workflow)
+        uses: actions/checkout@v6
+        with:
+          path: tooling
+
+      - name: Rebuild the AWDL branch on top of upstream
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          UPSTREAM_REF: ${{ inputs.upstream_ref || 'main' }}
+          TARGET_BRANCH: ${{ inputs.target_branch || 'feat/awdl-v1.22.0' }}
+          # The fork commit whose README carries the AWDL documentation the
+          # port splices into upstream's README.
+          FORK_README_SHA: b4796f69cdabe80e0457b497c75cc129ec001072
+        run: |
+          set -euo pipefail
+          # The scripts were written and verified against these exact paths,
+          # so recreate the paths instead of editing the scripts: what runs
+          # here is byte-for-byte what was tested.
+          sudo mkdir -p /data/fork-snapshot/openairdisplay-main
+          sudo chown -R "$(id -u):$(id -g)" /data
+          # blob:none keeps the 379 MB build-ios/ directory that was committed
+          # by accident on main out of this clone.
+          git clone --quiet --no-checkout --filter=blob:none \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" /data/work
+          cd /data/work
+          git remote add upstream https://github.com/peetzweg/opendisplay.git
+          git fetch --quiet upstream "${UPSTREAM_REF}"
+          UP_SHA="$(git rev-parse FETCH_HEAD)"
+          echo "upstream ${UPSTREAM_REF} = ${UP_SHA}"
+          git show "${FORK_README_SHA}:README.md" > /data/fork-snapshot/openairdisplay-main/README.md
+          git checkout -q -B "${TARGET_BRANCH}" "${UP_SHA}"
+          git clean -qfd
+          python3 "${GITHUB_WORKSPACE}/tooling/.github/awdl/apply_awdl.py"
+          python3 "${GITHUB_WORKSPACE}/tooling/.github/awdl/apply_awdl_extra.py"
+          git add -A
+          git --no-pager diff --cached --stat
+          git -c user.name="awdl-sync" -c user.email="awdl-sync@users.noreply.github.com" commit -q \
+            -m "feat: re-apply Apple peer-to-peer WiFi (AWDL) support onto upstream ${UP_SHA:0:7}" \
+            -m "Rebuilt from peetzweg/opendisplay@${UP_SHA}. Upstream folded the iOS listener into Shared/StreamReceiver.swift, so the includePeerToPeer legs and the listener-lifecycle fix were re-applied there, and the AWDL interface helper now lives in Shared/PeerToPeerWiFi.swift. The build-ios/ directory committed by accident on the old branch is not carried over."
+          git push --force --quiet origin "HEAD:refs/heads/${TARGET_BRANCH}"
+          echo "pushed ${TARGET_BRANCH} = $(git rev-parse --short HEAD) (upstream ${UP_SHA:0:7})"
