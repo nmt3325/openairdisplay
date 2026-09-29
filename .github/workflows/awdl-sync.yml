@@ -60,9 +60,17 @@ jobs:
           python3 "${GITHUB_WORKSPACE}/tooling/.github/awdl/apply_awdl.py"
           python3 "${GITHUB_WORKSPACE}/tooling/.github/awdl/apply_awdl_extra.py"
           git add -A
+          echo "--- port diff (expected: 6 files, +282/-13) ---"
           git --no-pager diff --cached --stat
+          # GITHUB_TOKEN is not allowed to create or update .github/workflows/*,
+          # and upstream changed release.yml and tests.yml since v1.16.0, so keep
+          # the fork's current version of those two files in this commit. They are
+          # raised to upstream's version in a follow-up commit pushed with a user
+          # token. pages.yml and pr-title.yml are identical in both trees.
+          git checkout origin/main -- .github/workflows/release.yml .github/workflows/tests.yml
+          git add -A
           git -c user.name="awdl-sync" -c user.email="awdl-sync@users.noreply.github.com" commit -q \
             -m "feat: re-apply Apple peer-to-peer WiFi (AWDL) support onto upstream ${UP_SHA:0:7}" \
-            -m "Rebuilt from peetzweg/opendisplay@${UP_SHA}. Upstream folded the iOS listener into Shared/StreamReceiver.swift, so the includePeerToPeer legs and the listener-lifecycle fix were re-applied there, and the AWDL interface helper now lives in Shared/PeerToPeerWiFi.swift. The build-ios/ directory committed by accident on the old branch is not carried over."
+            -m "Rebuilt from peetzweg/opendisplay@${UP_SHA}. Upstream folded the iOS listener into Shared/StreamReceiver.swift, so the includePeerToPeer legs and the listener-lifecycle fix were re-applied there, and the AWDL interface helper now lives in Shared/PeerToPeerWiFi.swift. The build-ios/ directory committed by accident on the old branch is not carried over. .github/workflows/release.yml and tests.yml are left at the fork's version because a GitHub App token cannot push workflow files; a follow-up commit restores upstream's version."
           git push --force --quiet origin "HEAD:refs/heads/${TARGET_BRANCH}"
           echo "pushed ${TARGET_BRANCH} = $(git rev-parse --short HEAD) (upstream ${UP_SHA:0:7})"
