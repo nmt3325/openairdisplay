@@ -79,6 +79,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // Fired on every hello — carries the receiver's install id so the
     // controller can deduplicate USB/WiFi sessions to the same device.
     @MainActor var onHello: ((PhoneInfo) -> Void)?
+    // Fired once a connection is live, naming the peer-to-peer WiFi interface
+    // it landed on (`awdl0`), or nil when the link runs over a local network,
+    // a cable or USB. Lets the UI say which path is carrying the session.
+    @MainActor var onPeerToPeer: ((String?) -> Void)?
     // Fired when the user stopped the capture from the system UI (menu-bar
     // recording indicator / "Stop Extending"). The controller disconnects
     // the session — teardown plus auto-connect opt-out — so the app honors
@@ -1253,6 +1257,12 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             let names = path.availableInterfaces.map(\.name).joined(separator: ",")
             Log.info("connection path to \(endpointName): \(names) wired=\(wired) direct=\(currentPathDirectLink)")
             Task { @MainActor in self.onTransportPath?(wired) }
+            // awdl0 and en0 both report InterfaceType.wifi, so "WiFi" on its
+            // own cannot say whether a router was involved — name the link.
+            let peerToPeer = conn.peerToPeerWiFiInterfaceName
+            Log.info(peerToPeer.map { "link: Apple peer-to-peer WiFi (\($0))" }
+                ?? "link: local network or USB")
+            Task { @MainActor in self.onPeerToPeer?(peerToPeer) }
         }
         // -forceUpgradeProbe YES: dev knob — loopback runs never look like
         // WiFi, so this is the only way to exercise probe+migrate on one Mac.
@@ -1468,6 +1478,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // pre-dial was tried and only ever hung until its timeout, adding 2s
         // to every connect. becomeReady reports which path won.
         let params = NWParameters(tls: nil, tcp: options)
+        // The Bonjour endpoint may live on Apple's peer-to-peer WiFi path when
+        // there is no infrastructure network. Dialing the service endpoint (not
+        // a resolved IP) is what lets Network.framework pick AWDL.
+        params.includePeerToPeer = true
         let conn = NWConnection(to: endpoint, using: params)
         connection = conn
         // A dial to a withdrawn Bonjour service (receiver asleep or app

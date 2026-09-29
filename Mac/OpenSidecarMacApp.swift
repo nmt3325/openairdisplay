@@ -106,6 +106,17 @@ enum ConnectionTarget: Hashable {
             return "wifi:unknown"
         }
     }
+
+    /// True when Bonjour only ever saw this service over Apple's peer-to-peer
+    /// WiFi link, i.e. no shared network is carrying it. Being visible on both
+    /// paths still counts as a local network, because that is the one the dial
+    /// will end up preferring.
+    var isPeerToPeerOnly: Bool {
+        guard case .wifi(let result) = self else { return false }
+        let interfaces = result.interfaces
+        return !interfaces.isEmpty
+            && interfaces.allSatisfy { isPeerToPeerWiFiInterface($0.name) }
+    }
 }
 
 /// One connected (or connecting) device: its target, its sender pipeline,
@@ -150,7 +161,18 @@ final class DeviceSession: ObservableObject, Identifiable {
     // rather than WiFi — reported by the sender once connected.
     @Published var wired = false
 
-    var transportLabel: String { onUSB ? "USB" : wired ? "Cable" : "WiFi" }
+    // Which WiFi link the live connection landed on: the interface name
+    // ("awdl0") for Apple's peer-to-peer path, nil for a local network, a
+    // cable or USB. Set by the sender the moment the connection is ready.
+    @Published var peerToPeerInterface: String?
+
+    /// "WiFi" on its own never said whether the two devices went through a
+    /// router or straight to each other — name the actual link instead.
+    var transportLabel: String {
+        if onUSB { return "USB" }
+        if wired { return "Cable" }
+        return peerToPeerInterface != nil ? "AWDL (direct)" : "WiFi (LAN)"
+    }
 
     init(id: String, target: ConnectionTarget, name: String, sender: MacSender) {
         self.id = id
@@ -256,8 +278,12 @@ final class SenderController: ObservableObject {
     }
 
     private func startBrowsing() {
+        // Include Apple's peer-to-peer WiFi path so Bonjour discovery also
+        // works when the Mac and receiver are not joined to an access point.
+        let params = NWParameters.tcp
+        params.includePeerToPeer = true
         // TXT records carry the receiver's install id (new receivers).
-        let browser = NWBrowser(for: .bonjourWithTXTRecord(type: "_opensidecar._tcp", domain: nil), using: .tcp)
+        let browser = NWBrowser(for: .bonjourWithTXTRecord(type: "_opensidecar._tcp", domain: nil), using: params)
         browser.browseResultsChangedHandler = { [weak self] results, _ in
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -610,6 +636,11 @@ final class SenderController: ObservableObject {
         }
         sender.onTransportPath = { [weak session] wired in
             session?.wired = wired
+            if wired { session?.peerToPeerInterface = nil }   // a cable is no WiFi link
+        }
+        sender.onPeerToPeer = { [weak session] interfaceName in
+            session?.peerToPeerInterface = interfaceName
+            Log.info("link[\(id)]: \(interfaceName ?? "local network or USB")")
         }
         sender.onPeerClosed = { [weak self, weak session] in
             // The receiver app quit — a deliberate goodbye, so no reconnect
@@ -687,10 +718,13 @@ final class SenderController: ObservableObject {
         let wifiTarget: ConnectionTarget?
 
         var transportLabel: String {
+            // No session exists yet, so the discovery path is the only hint:
+            // a service seen solely over awdl0 has no local network behind it.
+            let wifiLabel = (wifiTarget?.isPeerToPeerOnly ?? false) ? "AWDL" : "WiFi"
             switch (usbTarget != nil, wifiTarget != nil) {
-            case (true, true): return "USB · WiFi"
+            case (true, true): return "USB · \(wifiLabel)"
             case (true, false): return "USB"
-            case (false, true): return "WiFi"
+            case (false, true): return wifiLabel
             default: return ""
             }
         }

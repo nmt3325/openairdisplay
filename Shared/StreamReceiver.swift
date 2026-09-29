@@ -37,7 +37,7 @@ struct PerfStats: Equatable {
     var encodeP50 = 0.0          // Mac-side capture→socket (encode + queue)
     var rttMs = 0.0              // control-channel round trip
     var e2eSamples: [Double] = []  // last ~120 per-frame e2e latencies, ms
-    var transport = "—"          // USB (loopback via usbmux) or WiFi
+    var transport = "—"          // USB (usbmux loopback), WiFi (LAN) or AWDL
     var cursorPerSec = 0         // cursor position updates applied (this window)
     var cursorLost = 0           // UDP cursor datagrams missing or reordered (this window)
     var macDrops = 0             // enc + net drops (legacy total)
@@ -80,6 +80,21 @@ final class StreamReceiver: ObservableObject {
 
     private var listener: NWListener?
     private var listenerHealthy = false
+    /// A listener that exists but hasn't reached .ready yet. Without this,
+    /// ensureListening() (fired by scenePhase .active on every cold launch)
+    /// sees listenerHealthy == false and cancels the listener that is still
+    /// coming up. The cancelled socket keeps the fixed port for a few seconds
+    /// (allowLocalEndpointReuse is ignored here — FB8658821), so the immediate
+    /// rebind fails with EADDRINUSE and the retry re-arms the same race
+    /// forever. Peer-to-peer WiFi widened the window: AWDL bring-up delays
+    /// .ready, which is why this only started showing up over p2p.
+    private var listenerStarting = false
+    /// Collapses overlapping restarts so only one rebind is ever in flight.
+    private var restartPending = false
+    /// Invalidates a scheduled rebind when the session is closed meanwhile.
+    private var listenerGeneration = 0
+    /// Grows after each failed bind so retries outlast the port hold.
+    private var restartBackoff: TimeInterval = 0.5
     private var connection: NWConnection?
     // Cursor side channel: UDP on port+1. Cursor positions ride TCP behind
     // multi-hundred-KB video frames, so over WiFi one late frame stalls the
@@ -358,6 +373,12 @@ final class StreamReceiver: ObservableObject {
     func ensureListening() {
         queue.async {
             guard !self.listenerHealthy else { return }
+            // Never tear down a listener that is still negotiating its way to
+            // .ready — that is the cold-launch race, not a dead listener.
+            guard !self.listenerStarting else {
+                Log.info("listener still coming up — letting it finish")
+                return
+            }
             Log.info("listener not healthy — restarting")
             self.restartListener()
         }
@@ -414,9 +435,16 @@ final class StreamReceiver: ObservableObject {
                 finished = true
                 self.connection?.cancel()
                 self.connection = nil
+                self.listener?.stateUpdateHandler = nil
+                self.listener?.newConnectionHandler = nil
                 self.listener?.cancel()
                 self.listener = nil
                 self.listenerHealthy = false
+                self.listenerStarting = false
+                // Drop any rebind that was scheduled before we went dark.
+                self.listenerGeneration &+= 1
+                self.restartPending = false
+                self.restartBackoff = 0.5
                 self.stopCursorListener()
                 self.setConnected(false)
                 self.setStatus(status)
@@ -437,11 +465,38 @@ final class StreamReceiver: ObservableObject {
         }
     }
 
-    private func restartListener() {
-        listener?.cancel()
-        listener = nil
+    /// Re-arm the listener. Cancelling does not free the fixed port in the
+    /// same turn, so rebinding immediately fails with EADDRINUSE; wait for the
+    /// cancel to land first and let only one rebind be in flight.
+    private func restartListener(after delay: TimeInterval = 0) {
+        guard !restartPending else { return }
+        restartPending = true
         listenerHealthy = false
-        startListener()
+        listenerStarting = false
+        if let old = listener {
+            old.stateUpdateHandler = nil
+            old.newConnectionHandler = nil
+            old.cancel()
+        }
+        listener = nil
+        listenerGeneration &+= 1
+        let generation = listenerGeneration
+        queue.asyncAfter(deadline: .now() + max(delay, 0.35)) { [weak self] in
+            guard let self, generation == self.listenerGeneration else { return }
+            self.restartPending = false
+            self.startListener()
+        }
+    }
+
+    /// Back off between rebind attempts. A cancelled listener holds the port
+    /// for a few seconds, so retrying every second never lets it come free —
+    /// each attempt cancels a fresh socket and restarts the hold. Doubling up
+    /// to 8s outlasts it.
+    private func scheduleListenerRetry() {
+        let delay = restartBackoff
+        restartBackoff = min(restartBackoff * 2, 8.0)
+        Log.info("re-arming listener in \(delay)s")
+        restartListener(after: delay)
     }
 
     /// The UDP cursor listener follows the TCP listener's lifecycle: created
@@ -552,6 +607,8 @@ final class StreamReceiver: ObservableObject {
     }
 
     private func startListener() {
+        guard listener == nil else { return }
+        listenerStarting = true
         do {
             // noDelay matters most in THIS direction: touch events are tiny
             // packets, and Nagle would hold each one until the previous is
@@ -561,9 +618,15 @@ final class StreamReceiver: ObservableObject {
             let params = NWParameters(tls: nil, tcp: tcp)
             params.allowLocalEndpointReuse = true
             params.serviceClass = .interactiveVideo
+            // Advertise and accept over Apple's peer-to-peer WiFi path as well
+            // as a normal LAN, so no access point is required.
+            params.includePeerToPeer = true
             listener = try NWListener(using: params, on: NWEndpoint.Port(rawValue: port)!)
         } catch {
-            setStatus("Listener failed: \(error.localizedDescription)")
+            listenerStarting = false
+            Log.info("listener could not be created: \(error)")
+            setStatus("Listener failed — restarting…")
+            scheduleListenerRetry()
             return
         }
         // Advertise on the local network so the Mac can discover us for WiFi
@@ -628,14 +691,23 @@ final class StreamReceiver: ObservableObject {
             guard let self else { return }
             switch state {
             case .ready:
+                self.listenerStarting = false
                 self.listenerHealthy = true
+                self.restartBackoff = 0.5
                 self.setStatus("Listening on :\(self.port)")
+            case .waiting(let error):
+                // Transient: the interface (awdl0 on the peer-to-peer path)
+                // isn't up yet. Network framework retries on its own, so
+                // don't cancel — cancelling here is what strands the port.
+                Log.info("listener waiting: \(error)")
             case .failed(let error):
-                Log.info("listener failed: \(error) — restarting in 1s")
+                Log.info("listener failed: \(error)")
+                self.listenerStarting = false
                 self.listenerHealthy = false
                 self.setStatus("Listener failed — restarting…")
-                self.queue.asyncAfter(deadline: .now() + 1) { self.restartListener() }
+                self.scheduleListenerRetry()
             case .cancelled:
+                self.listenerStarting = false
                 self.listenerHealthy = false
             default: break
             }
@@ -677,6 +749,18 @@ final class StreamReceiver: ObservableObject {
         let onReady: () -> Void = { [weak self] in
             guard let self else { return }
             self.lastDataReceived = Date()
+            // USB was settled at accept time from the loopback address.
+            // Separating a direct AWDL link from infrastructure WiFi needs the
+            // connection's path, which does not exist until it is ready.
+            if self.transport != "USB" {
+                if let link = conn.peerToPeerWiFiInterfaceName {
+                    self.transport = "AWDL"
+                    Log.info("link: Apple peer-to-peer WiFi (\(link))")
+                } else {
+                    self.transport = "WiFi"
+                    Log.info("link: local network")
+                }
+            }
             self.setConnected(true)
             self.sendHello(on: conn)
         }
