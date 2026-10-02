@@ -570,13 +570,21 @@ on the Mac, and nothing happens if either is missing:
   Keyboard > Keyboard Shortcuts > Mission Control > *Move left/right a
   space*. They are on by default, but other apps do steal ⌃← / ⌃→.
 
+Every swipe says what it did in the Mac log, so none of this has to be guessed
+at. First `space switch right: space 1 of 3` when the gesture arrives, then
+either `space switch landed: space 2 of 3` or `space switch had no effect`
+followed by the reason — the shortcut turned off, nothing bound to ⌃← / ⌃→,
+or Accessibility access missing. With *Displays have separate Spaces* off, the
+log also notes that one space spans every screen, which is what makes a
+per-display switch impossible.
+
 ### Getting the logs for a bug report
 
 Both apps keep a local log of connection events. Nothing is uploaded anywhere;
 the logs only leave a device when you share them.
 
 - **Mac:** click **Logs** in the app panel. Finder opens with
-  `~/Library/Logs/OpenDisplay` selected.
+  `~/Library/Logs/OpenAirDisplay` selected.
 - **iPhone/iPad:** shake the device (or tap **Settings & Help** when idle), then
   open **Connection log**. Share hands the file to Mail, Messages or Files; copy
   puts the text on the clipboard for pasting straight into an issue.

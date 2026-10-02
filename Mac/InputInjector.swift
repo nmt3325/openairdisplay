@@ -1,6 +1,7 @@
 import CoreGraphics
 import AppKit
 import Darwin
+import Dispatch
 
 /// System double-click thresholds. Interval is public API; distance is read from
 /// AppKit's `NSDoubleClickDistance()` (same value the Window Server uses).
@@ -44,6 +45,9 @@ final class InputInjector {
     // Space switching: one swipe per animation, see handleSpaceSwitch.
     private var lastSpaceSwitch: CFAbsoluteTime = 0
     private let spaceSwitchCooldown: CFTimeInterval = 0.45
+    // Confirming a switch means reading the layout back after the animation,
+    // which has no business happening on the control channel's thread.
+    private let spaceVerifyQueue = DispatchQueue(label: "space-switch-verify")
 
     // Pencil-only synthetic click counting — tablet events don't get click
     // state from the Window Server, so we mirror macOS double-click prefs here.
@@ -164,15 +168,26 @@ final class InputInjector {
 
         // A display with a single space has nothing to switch to, which looks
         // exactly like a broken gesture. Say so instead of posting into a void.
-        if let layout = Spaces.layout(of: displayID) {
-            Log.info("space switch \(direction): space \(layout.current) of \(layout.count)")
-            if layout.count < 2 {
+        let before = Spaces.layout(of: displayID)
+        if let before {
+            Log.info("space switch \(direction): space \(before.current) of \(before.count)")
+            if before.count < 2 {
                 Log.info("space switch ignored: this display has one space. Add one in"
                          + " Mission Control (hover the top of this screen, then +).")
                 return
             }
         } else {
             Log.info("space switch \(direction): space layout unavailable")
+        }
+
+        // With "Displays have separate Spaces" off, a single space spans every
+        // screen and this display has no space of its own: the shortcut moves
+        // all of them together. Say so, because the gesture then looks like it
+        // is affecting the wrong screen rather than like a setting.
+        if SpacesSettings.spansDisplays {
+            Log.info("space switch: \"Displays have separate Spaces\" is off, so one space"
+                     + " spans every screen (System Settings > Desktop & Dock; the change"
+                     + " needs a log out).")
         }
 
         // A real keyboard brackets the arrow with the modifier's own key
@@ -183,6 +198,26 @@ final class InputInjector {
         postKey(virtualKey: keyCode, keyDown: true, flags: .maskControl)
         postKey(virtualKey: keyCode, keyDown: false, flags: .maskControl)
         postKey(virtualKey: 0x3B, keyDown: false, flags: [])
+
+        // Posting the shortcut is not proof that anything honored it: the
+        // binding can be off or taken by another app, and the Window Server can
+        // decline synthetic keys outright. Read the layout back once the
+        // animation has had time to run, so one try says which of those it was
+        // instead of leaving "nothing happened" to be guessed at.
+        spaceVerifyQueue.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+            self?.confirmSpaceSwitch(from: before)
+        }
+    }
+
+    /// Logs whether the posted shortcut actually moved this display's space.
+    private func confirmSpaceSwitch(from before: (count: Int, current: Int)?) {
+        guard let before, let after = Spaces.layout(of: displayID) else { return }
+        guard after.current == before.current else {
+            Log.info("space switch landed: space \(after.current) of \(after.count)")
+            return
+        }
+        Log.info("space switch had no effect: still space \(after.current) of"
+                 + " \(after.count). \(Hotkeys.spaceSwitchDiagnosis())")
     }
 
     private func postKey(virtualKey: CGKeyCode, keyDown: Bool, flags: CGEventFlags) {
@@ -407,5 +442,61 @@ private enum Spaces {
             return (spaces.count, (index ?? 0) + 1)
         }
         return nil
+    }
+}
+
+/// The Spaces preference that decides whether a per-display switch is even a
+/// coherent request. Read live: it is a setting the user can change under us.
+private enum SpacesSettings {
+    /// True when one space spans all displays, i.e. "Displays have separate
+    /// Spaces" is off.
+    static var spansDisplays: Bool {
+        CFPreferencesAppSynchronize("com.apple.spaces" as CFString)
+        let value = CFPreferencesCopyAppValue("spans-displays" as CFString,
+                                              "com.apple.spaces" as CFString)
+        return (value as? NSNumber)?.boolValue ?? false
+    }
+}
+
+/// Why a posted ⌃← / ⌃→ might have gone nowhere, phrased for the log.
+private enum Hotkeys {
+    private static let controlMask = 0x04_0000
+    private static let arrowKeys: Set<Int> = [123, 124]  // kVK_Left/RightArrow
+
+    /// The published table of symbolic hotkey IDs shifts between releases, so
+    /// this matches on what each entry is *bound to* instead: an entry on
+    /// Control plus an arrow is a space switch whatever its ID happens to be.
+    static func spaceSwitchDiagnosis() -> String {
+        guard AXIsProcessTrusted() else {
+            return "Accessibility access is not granted, so the Window Server drops our"
+                + " keys (System Settings > Privacy & Security > Accessibility)."
+        }
+        // Another process owns this domain, so make sure we are not reading a
+        // cached copy from before the user changed the setting.
+        CFPreferencesAppSynchronize("com.apple.symbolichotkeys" as CFString)
+        guard let entries = CFPreferencesCopyAppValue("AppleSymbolicHotKeys" as CFString,
+                                                      "com.apple.symbolichotkeys" as CFString)
+                as? [String: Any]
+        else { return "The keyboard shortcut settings could not be read." }
+
+        var bound = false
+        for case let entry as [String: Any] in entries.values {
+            guard let parameters = (entry["value"] as? [String: Any])?["parameters"]
+                      as? [NSNumber],
+                  parameters.count >= 3,
+                  arrowKeys.contains(parameters[1].intValue),
+                  parameters[2].intValue & controlMask != 0
+            else { continue }
+            bound = true
+            if (entry["enabled"] as? Bool) ?? true {
+                return "The Mission Control shortcut is enabled, so the Window Server"
+                    + " declined the synthetic keys — worth reporting with this log."
+            }
+        }
+        return bound
+            ? "Mission Control's \"Move left/right a space\" shortcut is turned off: switch"
+                + " it on in System Settings > Keyboard > Keyboard Shortcuts > Mission Control."
+            : "Nothing is bound to Control plus an arrow key: assign \"Move left/right a"
+                + " space\" in System Settings > Keyboard > Keyboard Shortcuts > Mission Control."
     }
 }
