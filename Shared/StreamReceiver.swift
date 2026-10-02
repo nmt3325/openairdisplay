@@ -1165,6 +1165,13 @@ final class StreamReceiver: ObservableObject {
         sendControl(["type": "scroll", "dx": dx, "dy": dy])
     }
 
+    /// Three-finger horizontal swipe: switch the Mac-side space (virtual
+    /// desktop) of the display this device is showing. direction is
+    /// "left" or "right"; older Macs ignore the unknown type.
+    func sendSpaceSwitch(direction: String) {
+        sendControl(["type": "spaceSwitch", "direction": direction])
+    }
+
     /// Apple Pencil stroke/hover. azimuth and altitude are radians.
     /// rotation is always 0 until Apple Pencil Pro barrel roll is wired up.
     func sendPencil(phase: String, x: Double, y: Double,
