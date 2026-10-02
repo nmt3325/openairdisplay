@@ -43,6 +43,9 @@ HiDPI, multi-device — behaves exactly as upstream.
 
 Each release is built from one upstream release and carries its number with an
 `-air` suffix, so `v1.25.0-air` is upstream v1.25.0 plus this fork's changes.
+When the fork ships something of its own between upstream releases, the base
+number stays put and a revision is appended: `v1.25.0-air.2`. The app version
+is still the upstream one — Sparkle tells builds apart by build number.
 The apps have their own bundle identifiers, their own Sparkle feeds and their
 own signing certificate, so they install next to OpenDisplay rather than
 replacing it. Downloads are on the

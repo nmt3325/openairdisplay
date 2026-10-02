@@ -3,8 +3,10 @@ run-name: OpenAirDisplay ${{ inputs.release_tag || github.ref_name }}
 
 on:
   push:
-    # Fork tags are the upstream version this build is based on, plus -air.
-    tags: ['v*-air']
+    # Fork tags are the upstream version this build is based on, plus -air,
+    # and optionally a fork revision for changes that ship between upstream
+    # releases: v1.25.0-air, v1.25.0-air.2, v1.25.0-air.3, ...
+    tags: ['v*-air', 'v*-air.*']
   workflow_dispatch:
     inputs:
       source_sha:
@@ -14,9 +16,9 @@ on:
         description: Numeric app version (blank uses config.json)
         type: string
       release_tag:
-        description: New release tag (upstream version + -air)
+        description: New release tag (upstream version + -air, plus .2, .3 ... for a fork revision)
         required: true
-        default: v1.25.0-air
+        default: v1.25.0-air.2
         type: string
       publish:
         description: Publish release and update feeds after verification
@@ -50,8 +52,11 @@ jobs:
           version="${REQUESTED_VERSION:-$(python3 -c 'import json; print(json.load(open(".github/fork-release/config.json"))["appVersion"])')}"
           tag="${REQUESTED_TAG:-$GITHUB_REF_NAME}"
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          # The tag names the upstream release this build is based on: v1.25.0-air
-          [[ "$tag" == "v$version-air" ]]
+          # The tag names the upstream release this build is based on
+          # (v1.25.0-air), with an optional fork revision for a second release
+          # off that same base (v1.25.0-air.2). The upstream number never moves
+          # for a revision: there is no such upstream release to point at.
+          [[ "$tag" == "v$version-air" || "$tag" =~ ^v${version//./\\.}-air\.([2-9]|[1-9][0-9]+)$ ]]
           echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "app_version=$version" >> "$GITHUB_OUTPUT"
           echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
