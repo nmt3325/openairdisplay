@@ -96,25 +96,50 @@ def environment():
     return env
 
 
+def _der_element(data, pos, end):
+    """Parse one element: (tag, body start, body end, next offset, definite).
+
+    Apple's code signing CMS is BER with indefinite lengths, so 0x80 means
+    "read children until the end-of-contents marker", not a one-byte length.
+    """
+    if pos + 2 > end:
+        raise ValueError('Truncated DER element')
+    tag = data[pos]
+    first = data[pos + 1]
+    if first == 0x80:
+        if not tag & 0x20:
+            raise ValueError('Indefinite length on a primitive element')
+        body = pos + 2
+        scan = body
+        while True:
+            if scan + 2 > end:
+                raise ValueError('Unterminated indefinite-length element')
+            if data[scan] == 0x00 and data[scan + 1] == 0x00:
+                return tag, body, scan, scan + 2, False
+            scan = _der_element(data, scan, end)[3]
+    if first & 0x80:
+        count = first & 0x7F
+        if count == 0 or count > 4 or pos + 2 + count > end:
+            raise ValueError('Unsupported DER length')
+        length = int.from_bytes(data[pos + 2:pos + 2 + count], 'big')
+        header = 2 + count
+    else:
+        length = first
+        header = 2
+    if pos + header + length > end:
+        raise ValueError('DER element runs past its parent')
+    return tag, pos + header, pos + header + length, pos + header + length, True
+
+
 def _der_children(data, start, end):
-    """Yield (tag, offset, header length, content length) for one DER level."""
+    """Yield (tag, offset, body start, body end, definite) for one level."""
     pos = start
     while pos < end:
-        if pos + 2 > end:
-            raise ValueError('Truncated DER element')
-        tag = data[pos]
-        length = data[pos + 1]
-        header = 2
-        if length & 0x80:
-            count = length & 0x7F
-            if count == 0 or count > 4 or pos + 2 + count > end:
-                raise ValueError('Unsupported DER length')
-            length = int.from_bytes(data[pos + 2:pos + 2 + count], 'big')
-            header = 2 + count
-        if pos + header + length > end:
-            raise ValueError('DER element runs past its parent')
-        yield tag, pos, header, length
-        pos += header + length
+        if data[pos] == 0x00:      # end-of-contents marker, or blob padding
+            return
+        tag, body, body_end, following, definite = _der_element(data, pos, end)
+        yield tag, pos, body, body_end, definite
+        pos = following
 
 
 def _looks_like_certificate(data, start, end):
@@ -133,13 +158,13 @@ def certificate_fingerprints(der):
     def walk(start, end, depth):
         if depth > 12:
             return
-        for tag, pos, header, length in _der_children(der, start, end):
-            body = pos + header
-            if tag == 0x30 and _looks_like_certificate(der, body, body + length):
-                found.append(hashlib.sha1(der[pos:body + length]).hexdigest())
+        for tag, pos, body, body_end, definite in _der_children(der, start, end):
+            if (tag == 0x30 and definite
+                    and _looks_like_certificate(der, body, body_end)):
+                found.append(hashlib.sha1(der[pos:body_end]).hexdigest())
                 continue
             if tag & 0x20:
-                walk(body, body + length, depth + 1)
+                walk(body, body_end, depth + 1)
 
     walk(0, len(der), 0)
     return found
@@ -375,10 +400,14 @@ def check_mac_archive(path, role, row, env):
               % (label, info.get('LSMinimumSystemVersion'), row['minimumSystemVersion']))
         executable = app + '/Contents/MacOS/' + info['CFBundleExecutable']
         if check(executable in names, label + ': no main executable'):
-            architectures = inspect_signed_macho(
-                archive.read(executable), label, identifier, leaf)
-            check(architectures == {'arm64', 'x86_64'},
-                  label + ': architectures are ' + repr(sorted(architectures)))
+            try:
+                architectures = inspect_signed_macho(
+                    archive.read(executable), label, identifier, leaf)
+            except (ValueError, IndexError, KeyError, struct.error) as error:
+                fail(label + ': cannot parse the code signature: ' + str(error))
+            else:
+                check(architectures == {'arm64', 'x86_64'},
+                      label + ': architectures are ' + repr(sorted(architectures)))
         scan_archive_for_keys(archive, label)
 
 
