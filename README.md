@@ -553,6 +553,23 @@ All live under **Privacy & Security** in System Settings (Mac) / Settings
 without them. If the prompt never appeared, toggle the entry manually or
 force-quit and reopen the app.
 
+### Three-finger swipe between desktops
+
+Swiping sideways with three fingers switches the Space (desktop) shown on
+that screen. macOS has no public per-display Spaces API, so the Mac app posts
+the ⌃← / ⌃→ shortcut with the pointer parked on the virtual display — the
+shortcut acts on the display the pointer is over. Two things have to be true
+on the Mac, and nothing happens if either is missing:
+
+- **That screen needs a second Space.** A fresh extended display has exactly
+  one, and one desktop has nowhere to switch to. Add one in Mission Control:
+  move the pointer onto the phone's screen, open Mission Control, then click
+  **+** in the Spaces bar at the top of *that* screen. The Mac app logs
+  `space switch ignored: this display has one space` when this is the problem.
+- **Mission Control's shortcuts must be enabled** — System Settings >
+  Keyboard > Keyboard Shortcuts > Mission Control > *Move left/right a
+  space*. They are on by default, but other apps do steal ⌃← / ⌃→.
+
 ### Getting the logs for a bug report
 
 Both apps keep a local log of connection events. Nothing is uploaded anywhere;
