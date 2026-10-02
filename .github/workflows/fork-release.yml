@@ -1,0 +1,56 @@
+name: Fork release builds
+run-name: Fork ${{ inputs.app_version }} @ ${{ inputs.source_sha }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Full commit SHA to build (not a moving branch)
+        required: true
+        type: string
+      app_version:
+        description: Numeric app version
+        required: true
+        default: '1.22.0'
+        type: string
+
+permissions:
+  contents: read
+concurrency:
+  group: fork-build-${{ inputs.source_sha }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: macos-26
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [macOS, iOS]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Build and verify release artifacts
+        env:
+          APP_VERSION: ${{ inputs.app_version }}
+          APP_BUILD_NUMBER: ${{ github.run_number }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          PLATFORM: ${{ matrix.platform }}
+        run: bash .github/fork-release/build.sh "$PLATFORM"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fork-release-${{ matrix.platform }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fork-release-logs-${{ matrix.platform }}
+          path: ${{ runner.temp }}/openairdisplay-*.log
+          if-no-files-found: ignore
