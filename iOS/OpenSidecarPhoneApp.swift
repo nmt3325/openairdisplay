@@ -709,20 +709,18 @@ struct VideoLayerView: UIViewRepresentable {
         }
         view.inputEngine.install(on: view)
 
-        let pan = UIPanGestureRecognizer(target: view, action: #selector(VideoView.didTwoFingerPan(_:)))
+        // Two fingers scroll, three switch the space (virtual desktop) that
+        // this display shows, like the trackpad gestures on the Mac itself.
+        // One recognizer handles both: with two of them, whichever recognizes
+        // first prevents the other, and since three fingers land milliseconds
+        // apart the two-finger pan usually won the race and the space swipe
+        // never fired. A pan rather than a swipe recognizer, because swipes
+        // fire once at a fixed velocity and we want direction plus distance.
+        let pan = UIPanGestureRecognizer(target: view,
+                                         action: #selector(VideoView.didMultiFingerPan(_:)))
         pan.minimumNumberOfTouches = 2
-        pan.maximumNumberOfTouches = 2
+        pan.maximumNumberOfTouches = 3
         view.addGestureRecognizer(pan)
-
-        // Three fingers sideways switches the space (virtual desktop) that this
-        // display shows, like the trackpad gesture on the Mac itself. A pan
-        // rather than a swipe recognizer: swipes fire once at a fixed velocity,
-        // and we want to read direction plus distance ourselves.
-        let spacePan = UIPanGestureRecognizer(target: view,
-                                              action: #selector(VideoView.didThreeFingerPan(_:)))
-        spacePan.minimumNumberOfTouches = 3
-        spacePan.maximumNumberOfTouches = 3
-        view.addGestureRecognizer(spacePan)
 
         // Local cursor echo: position updates ride the ~2ms control path
         // instead of the ~30ms video path, so the pointer feels native.
@@ -941,64 +939,119 @@ struct VideoLayerView: UIViewRepresentable {
 
         // MARK: Three-finger space switch
 
-        /// One switch per swipe: armed at touch-down, spent on the first
-        /// committed direction, rearmed when the fingers lift.
+        /// One switch per swipe: armed when the third finger lands, spent on
+        /// the first committed direction, rearmed when the fingers lift.
         private var threeFingerFired = false
+        /// Where the swipe started, so a gesture that began as a two-finger
+        /// scroll measures from the moment the third finger joined.
+        private var spacePanOrigin = CGPoint.zero
         /// Sideways travel (points) that commits to a space switch.
-        private let spaceSwipeThreshold: CGFloat = 60
+        private let spaceSwipeThreshold: CGFloat = 50
 
-        @objc func didThreeFingerPan(_ recognizer: UIPanGestureRecognizer) {
+        /// iPadOS claims three-finger swipes for the undo/redo editing HUD,
+        /// and that system gesture outranks anything the app installs — on an
+        /// iPad our swipe never recognized at all. The view has no text to
+        /// edit, so opt the whole subtree out and the fingers come back to us.
+        override var editingInteractionConfiguration: UIEditingInteractionConfiguration { .none }
+
+        private func beginSpacePan(_ recognizer: UIPanGestureRecognizer) {
+            twoFingerActive = false
+            threeFingerActive = true
+            threeFingerFired = false
+            spacePanOrigin = recognizer.translation(in: self)
+            stopMomentum()
+        }
+
+        private func updateSpacePan(_ recognizer: UIPanGestureRecognizer) {
+            guard !threeFingerFired else { return }
+            let t = recognizer.translation(in: self)
+            let dx = t.x - spacePanOrigin.x
+            let dy = t.y - spacePanOrigin.y
+            // Sideways and clearly so: a three-finger drag heading down is
+            // not a space switch.
+            guard abs(dx) > spaceSwipeThreshold, abs(dx) > abs(dy) * 1.5 else { return }
+            threeFingerFired = true
+            // Natural direction, as on the Mac's own trackpad: pushing the
+            // content left brings in the space to the right.
+            let direction = dx < 0 ? "right" : "left"
+            Log.info("space swipe: \(direction)")
+            receiver?.sendSpaceSwitch(direction: direction)
+        }
+
+        private func endSpacePan() {
+            threeFingerActive = false
+            threeFingerFired = false
+        }
+
+        // MARK: Multi-finger pan
+
+        @objc func didMultiFingerPan(_ recognizer: UIPanGestureRecognizer) {
             switch recognizer.state {
             case .began:
-                threeFingerActive = true
-                threeFingerFired = false
-                stopMomentum()
+                if recognizer.numberOfTouches >= 3 {
+                    beginSpacePan(recognizer)
+                } else {
+                    beginScrollPan(recognizer)
+                }
             case .changed:
-                guard !threeFingerFired else { return }
-                let t = recognizer.translation(in: self)
-                // Sideways and clearly so: a three-finger drag heading down is
-                // not a space switch.
-                guard abs(t.x) > spaceSwipeThreshold, abs(t.x) > abs(t.y) * 1.5 else { return }
-                threeFingerFired = true
-                // Natural direction, as on the Mac's own trackpad: pushing the
-                // content left brings in the space to the right.
-                receiver?.sendSpaceSwitch(direction: t.x < 0 ? "right" : "left")
+                // A third finger joining mid-scroll means the user is going for
+                // a space swipe; UIKit keeps the same gesture running, so the
+                // mode has to change in place.
+                if !threeFingerActive, recognizer.numberOfTouches >= 3 {
+                    beginSpacePan(recognizer)
+                }
+                if threeFingerActive {
+                    updateSpacePan(recognizer)
+                } else {
+                    updateScrollPan(recognizer)
+                }
+            case .ended:
+                if threeFingerActive {
+                    endSpacePan()
+                } else {
+                    endScrollPan(coast: true, recognizer: recognizer)
+                }
             default:
-                threeFingerActive = false
-                threeFingerFired = false
+                if threeFingerActive {
+                    endSpacePan()
+                } else {
+                    endScrollPan(coast: false, recognizer: recognizer)
+                }
             }
         }
 
-        @objc func didTwoFingerPan(_ recognizer: UIPanGestureRecognizer) {
+        private func beginScrollPan(_ recognizer: UIPanGestureRecognizer) {
+            twoFingerActive = true
+            lastPan = recognizer.translation(in: self)
+            stopMomentum()
+            // macOS delivers scroll to whatever sits under the cursor, and
+            // the cursor no longer follows the fingers now that a press is
+            // withheld until it commits. Put it on the gesture once, up
+            // front, so the scroll lands on the window being touched. Once
+            // only: a real trackpad does not drag the cursor while
+            // scrolling, and moving it mid-gesture would change the target.
+            if let n = normalized(recognizer.location(in: self)) {
+                lastNorm = n
+                receiver?.sendTouch(phase: "moved", x: n.x, y: n.y)
+            }
+        }
+
+        private func updateScrollPan(_ recognizer: UIPanGestureRecognizer) {
             guard let video = receiver?.videoSize, video != .zero else { return }
-            switch recognizer.state {
-            case .began:
-                twoFingerActive = true
-                lastPan = .zero
-                stopMomentum()
-                // macOS delivers scroll to whatever sits under the cursor, and
-                // the cursor no longer follows the fingers now that a press is
-                // withheld until it commits. Put it on the gesture once, up
-                // front, so the scroll lands on the window being touched. Once
-                // only: a real trackpad does not drag the cursor while
-                // scrolling, and moving it mid-gesture would change the target.
-                if let n = normalized(recognizer.location(in: self)) {
-                    lastNorm = n
-                    receiver?.sendTouch(phase: "moved", x: n.x, y: n.y)
-                }
-            case .changed:
-                let t = recognizer.translation(in: self)
-                let scale = min(bounds.width / video.width, bounds.height / video.height)
-                // Deltas in video pixels, natural-scrolling direction.
-                receiver?.sendScroll(dx: (t.x - lastPan.x) / scale,
-                                     dy: (t.y - lastPan.y) / scale)
-                lastPan = t
-            case .ended:
-                twoFingerActive = false
-                // Let go and it coasts, same as lifting off a trackpad.
+            let t = recognizer.translation(in: self)
+            let scale = min(bounds.width / video.width, bounds.height / video.height)
+            // Deltas in video pixels, natural-scrolling direction.
+            receiver?.sendScroll(dx: (t.x - lastPan.x) / scale,
+                                 dy: (t.y - lastPan.y) / scale)
+            lastPan = t
+        }
+
+        private func endScrollPan(coast: Bool, recognizer: UIPanGestureRecognizer) {
+            twoFingerActive = false
+            // Let go and it coasts, same as lifting off a trackpad.
+            if coast {
                 startMomentum(velocity: recognizer.velocity(in: self))
-            default:
-                twoFingerActive = false
+            } else {
                 stopMomentum()
             }
         }

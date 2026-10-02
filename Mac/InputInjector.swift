@@ -138,7 +138,8 @@ final class InputInjector {
     /// it needs SIP partially disabled, which a display driver has no business
     /// requiring. So we post what the trackpad shortcut posts, Control+Arrow,
     /// after parking the cursor on our display: with "Displays have separate
-    /// Spaces" on, the Window Server applies it to the active display.
+    /// Spaces" on, the shortcut acts on the display the pointer is over, not
+    /// on whichever window happens to be focused.
     func handleSpaceSwitch(direction: String) {
         let keyCode: CGKeyCode
         switch direction {
@@ -153,18 +154,42 @@ final class InputInjector {
         lastSpaceSwitch = now
 
         // During a touch gesture the cursor already sits on this display, but
-        // a swipe can also be the first thing a session sees.
+        // a swipe can also be the first thing a session sees. The Window
+        // Server needs a moment to register a warp before the keys land.
         let bounds = CGDisplayBounds(displayID)
         if !bounds.contains(currentCursor()) {
             CGWarpMouseCursorPosition(CGPoint(x: bounds.midX, y: bounds.midY))
+            usleep(15_000)
         }
 
-        for keyDown in [true, false] {
-            guard let event = CGEvent(keyboardEventSource: source,
-                                      virtualKey: keyCode, keyDown: keyDown) else { continue }
-            event.flags = .maskControl
-            event.post(tap: .cghidEventTap)
+        // A display with a single space has nothing to switch to, which looks
+        // exactly like a broken gesture. Say so instead of posting into a void.
+        if let layout = Spaces.layout(of: displayID) {
+            Log.info("space switch \(direction): space \(layout.current) of \(layout.count)")
+            if layout.count < 2 {
+                Log.info("space switch ignored: this display has one space. Add one in"
+                         + " Mission Control (hover the top of this screen, then +).")
+                return
+            }
+        } else {
+            Log.info("space switch \(direction): space layout unavailable")
         }
+
+        // A real keyboard brackets the arrow with the modifier's own key
+        // events. The Window Server's hotkey layer reads that live modifier
+        // state, and an arrow carrying nothing but `flags` is the pattern that
+        // Cmd-Tab and the Spaces shortcuts are known to ignore.
+        postKey(virtualKey: 0x3B, keyDown: true, flags: .maskControl)   // kVK_Control
+        postKey(virtualKey: keyCode, keyDown: true, flags: .maskControl)
+        postKey(virtualKey: keyCode, keyDown: false, flags: .maskControl)
+        postKey(virtualKey: 0x3B, keyDown: false, flags: [])
+    }
+
+    private func postKey(virtualKey: CGKeyCode, keyDown: Bool, flags: CGEventFlags) {
+        guard let event = CGEvent(keyboardEventSource: source,
+                                  virtualKey: virtualKey, keyDown: keyDown) else { return }
+        event.flags = flags
+        event.post(tap: .cghidEventTap)
     }
 
     func handleProximity(entering: Bool, x: Double, y: Double) {
@@ -333,5 +358,54 @@ final class InputInjector {
 
     private func currentCursor() -> CGPoint {
         CGEvent(source: source)?.location ?? .zero
+    }
+}
+
+/// Read-only Spaces lookup. Reading the layout needs nothing special — it is
+/// only *changing* a space from outside Dock that requires a scripting
+/// addition — so the SkyLight symbols are resolved lazily and every failure
+/// degrades to "unknown" rather than to a crash on the next macOS.
+private enum Spaces {
+    private typealias MainConnectionFn = @convention(c) () -> Int32
+    private typealias CopyDisplaySpacesFn = @convention(c) (Int32) -> Unmanaged<CFArray>?
+
+    private static let handle = dlopen(
+        "/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight", RTLD_LAZY)
+
+    private static func symbol<T>(_ name: String, as type: T.Type) -> T? {
+        guard let handle, let address = dlsym(handle, name) else { return nil }
+        return unsafeBitCast(address, to: type)
+    }
+
+    private static let mainConnection = symbol("SLSMainConnectionID", as: MainConnectionFn.self)
+    private static let copyDisplaySpaces = symbol("SLSCopyManagedDisplaySpaces",
+                                                  as: CopyDisplaySpacesFn.self)
+
+    private static func spaceID(_ space: [String: Any]) -> Int64? {
+        (space["ManagedSpaceID"] as? NSNumber ?? space["id64"] as? NSNumber)?.int64Value
+    }
+
+    /// How many spaces a display holds and which one it is showing (1-based),
+    /// or nil when the lookup is unavailable or the display is not listed.
+    static func layout(of displayID: CGDirectDisplayID) -> (count: Int, current: Int)? {
+        guard let mainConnection, let copyDisplaySpaces,
+              let displays = copyDisplaySpaces(mainConnection())?.takeRetainedValue()
+                  as? [[String: Any]],
+              let uuid = CGDisplayCreateUUIDFromDisplayID(displayID)?.takeRetainedValue(),
+              let uuidString = CFUUIDCreateString(nil, uuid)
+        else { return nil }
+        let identifier = uuidString as String
+        // The main display is listed under a placeholder on some versions.
+        let isMain = CGDisplayIsMain(displayID) != 0
+        for display in displays {
+            let name = display["Display Identifier"] as? String
+            guard name == identifier || (isMain && name == "Main") else { continue }
+            guard let spaces = display["Spaces"] as? [[String: Any]], !spaces.isEmpty
+            else { return nil }
+            let currentID = (display["Current Space"] as? [String: Any]).flatMap(spaceID)
+            let index = spaces.firstIndex { spaceID($0) == currentID }
+            return (spaces.count, (index ?? 0) + 1)
+        }
+        return nil
     }
 }
