@@ -77,8 +77,10 @@ pipeline, USB transport, input injection) are already working.
 - 🔍 **Retina / HiDPI** — the virtual display matches the device panel
   pixel-for-pixel (@2x), so text is sharp.
 - 👆 **Touch input built in** — your iPhone becomes a touchscreen for macOS:
-  **tap to click**, **drag to drag**, and **two-finger scroll** that feels
-  like a trackpad. (Apple Pencil support is on the roadmap.)
+  **tap to click**, **drag to drag**, **two-finger scroll** with momentum,
+  and a **three-finger swipe** to flip that screen between desktops
+  (Spaces), all of it feeling like a trackpad. (Apple Pencil support is on
+  the roadmap.)
 - 🔄 **Portrait or landscape** — rotate the device and the virtual display
   rebuilds itself as a vertical monitor at native resolution.
 - ⚡ **Low-latency pipeline** — hardware H.264 or HEVC encode (VideoToolbox,

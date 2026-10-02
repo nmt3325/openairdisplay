@@ -409,7 +409,7 @@ struct SettingsView: View {
                           systemImage: "wifi")
                     Label("Rotate the \(deviceKind) for a vertical second monitor.",
                           systemImage: "rotate.right")
-                    Label("Touch: tap to click, drag to drag, two-finger pan to scroll.",
+                    Label("Touch: tap to click, drag to drag, two-finger pan to scroll (it keeps gliding), three-finger swipe to switch this screen's desktop.",
                           systemImage: "hand.tap")
                 } header: {
                     Text("How to connect")
@@ -714,6 +714,16 @@ struct VideoLayerView: UIViewRepresentable {
         pan.maximumNumberOfTouches = 2
         view.addGestureRecognizer(pan)
 
+        // Three fingers sideways switches the space (virtual desktop) that this
+        // display shows, like the trackpad gesture on the Mac itself. A pan
+        // rather than a swipe recognizer: swipes fire once at a fixed velocity,
+        // and we want to read direction plus distance ourselves.
+        let spacePan = UIPanGestureRecognizer(target: view,
+                                              action: #selector(VideoView.didThreeFingerPan(_:)))
+        spacePan.minimumNumberOfTouches = 3
+        spacePan.maximumNumberOfTouches = 3
+        view.addGestureRecognizer(spacePan)
+
         // Local cursor echo: position updates ride the ~2ms control path
         // instead of the ~30ms video path, so the pointer feels native.
         receiver.onCursor = { [weak view] x, y, visible in
@@ -852,8 +862,112 @@ struct VideoLayerView: UIViewRepresentable {
         }
 
         private var twoFingerActive = false
+        private var threeFingerActive = false
         private var lastPan = CGPoint.zero
         private var lastNorm: (x: Double, y: Double) = (0.5, 0.5)
+
+        // MARK: Scroll momentum
+
+        /// Flick speed (points/s) under which the fingers were simply stopping.
+        private let momentumMinVelocity: CGFloat = 120
+        /// Share of the velocity left after one second of coasting.
+        private let momentumDecayPerSecond: Double = 0.002
+        /// Hard stop, so a hard flick cannot scroll for a quarter of a minute.
+        private let momentumMaxDuration: CFTimeInterval = 1.6
+        private var momentumVelocity = CGPoint.zero
+        private var momentumLink: CADisplayLink?
+        private var momentumLastTimestamp: CFTimeInterval = 0
+        private var momentumElapsed: CFTimeInterval = 0
+
+        /// Keep scrolling after the fingers leave, the way a trackpad does.
+        /// The wire carries plain deltas with no gesture/momentum phase, so the
+        /// glide is synthesized here rather than handed to macOS to animate.
+        private func startMomentum(velocity: CGPoint) {
+            stopMomentum()
+            guard hypot(velocity.x, velocity.y) > momentumMinVelocity else { return }
+            momentumVelocity = velocity
+            momentumElapsed = 0
+            momentumLastTimestamp = 0
+            let link = CADisplayLink(target: self, selector: #selector(stepMomentum(_:)))
+            link.add(to: .main, forMode: .common)
+            momentumLink = link
+        }
+
+        /// Any new contact cancels the glide — catching a moving list is the
+        /// one thing that must never lag.
+        private func stopMomentum() {
+            momentumLink?.invalidate()
+            momentumLink = nil
+            momentumVelocity = .zero
+        }
+
+        /// A live display link retains this view, so a glide that outlives the
+        /// view tree (the metal toggle rebuilds it) would keep scrolling a dead
+        /// receiver and leak the view.
+        override func willMove(toWindow newWindow: UIWindow?) {
+            super.willMove(toWindow: newWindow)
+            if newWindow == nil { stopMomentum() }
+        }
+
+        @objc private func stepMomentum(_ link: CADisplayLink) {
+            guard let video = receiver?.videoSize, video != .zero else {
+                stopMomentum()
+                return
+            }
+            // First callback only establishes the clock.
+            if momentumLastTimestamp == 0 {
+                momentumLastTimestamp = link.timestamp
+                return
+            }
+            let dt = link.timestamp - momentumLastTimestamp
+            momentumLastTimestamp = link.timestamp
+            guard dt > 0 else { return }
+            momentumElapsed += dt
+
+            let scale = min(bounds.width / video.width, bounds.height / video.height)
+            receiver?.sendScroll(dx: Double(momentumVelocity.x * CGFloat(dt) / scale),
+                                 dy: Double(momentumVelocity.y * CGFloat(dt) / scale))
+
+            // Decay per elapsed second, not per frame: a 120Hz device has to
+            // coast exactly as far as a 60Hz one.
+            let decay = CGFloat(pow(momentumDecayPerSecond, dt))
+            momentumVelocity.x *= decay
+            momentumVelocity.y *= decay
+            if hypot(momentumVelocity.x, momentumVelocity.y) < momentumMinVelocity / 4
+                || momentumElapsed > momentumMaxDuration {
+                stopMomentum()
+            }
+        }
+
+        // MARK: Three-finger space switch
+
+        /// One switch per swipe: armed at touch-down, spent on the first
+        /// committed direction, rearmed when the fingers lift.
+        private var threeFingerFired = false
+        /// Sideways travel (points) that commits to a space switch.
+        private let spaceSwipeThreshold: CGFloat = 60
+
+        @objc func didThreeFingerPan(_ recognizer: UIPanGestureRecognizer) {
+            switch recognizer.state {
+            case .began:
+                threeFingerActive = true
+                threeFingerFired = false
+                stopMomentum()
+            case .changed:
+                guard !threeFingerFired else { return }
+                let t = recognizer.translation(in: self)
+                // Sideways and clearly so: a three-finger drag heading down is
+                // not a space switch.
+                guard abs(t.x) > spaceSwipeThreshold, abs(t.x) > abs(t.y) * 1.5 else { return }
+                threeFingerFired = true
+                // Natural direction, as on the Mac's own trackpad: pushing the
+                // content left brings in the space to the right.
+                receiver?.sendSpaceSwitch(direction: t.x < 0 ? "right" : "left")
+            default:
+                threeFingerActive = false
+                threeFingerFired = false
+            }
+        }
 
         @objc func didTwoFingerPan(_ recognizer: UIPanGestureRecognizer) {
             guard let video = receiver?.videoSize, video != .zero else { return }
@@ -861,6 +975,7 @@ struct VideoLayerView: UIViewRepresentable {
             case .began:
                 twoFingerActive = true
                 lastPan = .zero
+                stopMomentum()
                 // macOS delivers scroll to whatever sits under the cursor, and
                 // the cursor no longer follows the fingers now that a press is
                 // withheld until it commits. Put it on the gesture once, up
@@ -878,8 +993,13 @@ struct VideoLayerView: UIViewRepresentable {
                 receiver?.sendScroll(dx: (t.x - lastPan.x) / scale,
                                      dy: (t.y - lastPan.y) / scale)
                 lastPan = t
+            case .ended:
+                twoFingerActive = false
+                // Let go and it coasts, same as lifting off a trackpad.
+                startMomentum(velocity: recognizer.velocity(in: self))
             default:
                 twoFingerActive = false
+                stopMomentum()
             }
         }
 
@@ -923,9 +1043,11 @@ struct VideoLayerView: UIViewRepresentable {
         private func send(_ phase: String, _ touches: Set<UITouch>, _ event: UIEvent?) {
             let fingers = touches.filter { isFinger($0) }
             guard !fingers.isEmpty else { return }
-            // Ignore single-finger events while a two-finger gesture runs,
-            // and end the click if a second finger joins mid-press.
-            if twoFingerActive || (event?.allTouches?.filter { isFinger($0) }.count ?? 1) > 1 {
+            // Ignore single-finger events while a multi-finger gesture runs,
+            // and end the click if another finger joins mid-press.
+            if twoFingerActive || threeFingerActive
+                || (event?.allTouches?.filter { isFinger($0) }.count ?? 1) > 1 {
+                stopMomentum()
                 if downSent {
                     receiver?.sendTouch(phase: "cancelled", x: lastNorm.x, y: lastNorm.y)
                 }
@@ -938,6 +1060,8 @@ struct VideoLayerView: UIViewRepresentable {
 
             switch phase {
             case "began":
+                // A finger landing stops a coasting scroll before anything else.
+                stopMomentum()
                 let location = touch.location(in: self)
                 pendingDown = norm
                 pendingDownPoint = location

@@ -2390,6 +2390,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             if let dx = obj["dx"] as? Double, let dy = obj["dy"] as? Double {
                 inputInjector?.handleScroll(dx: dx, dy: dy)
             }
+        case "spaceSwitch":
+            // Three-finger swipe on the phone: switch this display's space.
+            if let direction = obj["direction"] as? String {
+                inputInjector?.handleSpaceSwitch(direction: direction)
+            }
         case "pencil":
             if let phase = obj["phase"] as? String,
                let x = obj["x"] as? Double,

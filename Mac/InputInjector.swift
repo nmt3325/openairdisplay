@@ -41,6 +41,9 @@ final class InputInjector {
     private let vendorPointerType: Int64 = 0x0802    // Grip Pen (what apps expect)
     private let capabilityMask: Int64 = 0x05C7       // pressure + tilt + rotation + buttons
     private var inRange = false
+    // Space switching: one swipe per animation, see handleSpaceSwitch.
+    private var lastSpaceSwitch: CFAbsoluteTime = 0
+    private let spaceSwitchCooldown: CFTimeInterval = 0.45
 
     // Pencil-only synthetic click counting — tablet events don't get click
     // state from the Window Server, so we mirror macOS double-click prefs here.
@@ -124,6 +127,44 @@ final class InputInjector {
                                   wheel2: Int32((dx / scale).rounded()),
                                   wheel3: 0) else { return }
         event.post(tap: .cghidEventTap)
+    }
+
+    /// Mission Control space switch for *this* display, from the phone's
+    /// three-finger swipe. direction is "left" or "right".
+    ///
+    /// There is no public per-display Spaces API, and the private one
+    /// (SLSManagedDisplaySetCurrentSpace) only takes effect from inside Dock —
+    /// that is what tiling window managers ship a scripting addition for, and
+    /// it needs SIP partially disabled, which a display driver has no business
+    /// requiring. So we post what the trackpad shortcut posts, Control+Arrow,
+    /// after parking the cursor on our display: with "Displays have separate
+    /// Spaces" on, the Window Server applies it to the active display.
+    func handleSpaceSwitch(direction: String) {
+        let keyCode: CGKeyCode
+        switch direction {
+        case "left": keyCode = 123    // kVK_LeftArrow
+        case "right": keyCode = 124   // kVK_RightArrow
+        default: return
+        }
+        // The switch animation runs ~0.4s and queued repeats stack into a
+        // sprint across every space, so swallow anything that close behind.
+        let now = CFAbsoluteTimeGetCurrent()
+        guard now - lastSpaceSwitch > spaceSwitchCooldown else { return }
+        lastSpaceSwitch = now
+
+        // During a touch gesture the cursor already sits on this display, but
+        // a swipe can also be the first thing a session sees.
+        let bounds = CGDisplayBounds(displayID)
+        if !bounds.contains(currentCursor()) {
+            CGWarpMouseCursorPosition(CGPoint(x: bounds.midX, y: bounds.midY))
+        }
+
+        for keyDown in [true, false] {
+            guard let event = CGEvent(keyboardEventSource: source,
+                                      virtualKey: keyCode, keyDown: keyDown) else { continue }
+            event.flags = .maskControl
+            event.post(tap: .cghidEventTap)
+        }
     }
 
     func handleProximity(entering: Bool, x: Double, y: Double) {

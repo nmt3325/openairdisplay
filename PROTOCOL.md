@@ -254,6 +254,7 @@ Coordinates use the conventions of section 7.
 | `ping` | pv 1 | `t` | Liveness + clock sync probe |
 | `touch` | pv 1 | `phase`, `x`, `y`, `t`? | Finger input |
 | `scroll` | pv 1 | `dx`, `dy` | Two-finger scroll |
+| `spaceSwitch` | pv 3 (additive) | `direction` | Three-finger swipe: switch this display's space |
 | `pencil` | pv 3 | `phase`, `x`, `y`, `pressure`, `azimuth`, `altitude`, `rotation`, `t`? | Stylus input |
 | `proximity` | pv 3 | `entering`, `x`, `y` | Stylus hover enter/leave |
 | `kf` | pv 1 | none | Request an IDR (section 5.3) |
@@ -325,7 +326,20 @@ known).
 **`scroll`** carries `dx`, `dy` (numbers): scroll deltas in **video
 pixels** (section 7) with **natural-scrolling sign** (content follows the
 fingers: fingers moving down produce positive `dy` and the scrolled content
-moves down).
+moves down). The receiver MAY keep sending decaying deltas after the
+fingers lift (trackpad-style momentum): the wire has no gesture or momentum
+phase, so a glide is indistinguishable from slow scrolling, and a sender
+needs no special handling for it.
+
+**`spaceSwitch`** (pv 3, additive) carries `direction` (string): `"left"`
+or `"right"` — which neighbouring space (macOS virtual desktop) to move
+to, in natural-swipe terms, for **the display this session drives**. Sent
+once per three-finger swipe. A sender MAY ignore it: macOS exposes no
+public per-display Spaces API, so the reference sender posts
+Control+Arrow after making sure the cursor sits on its display, which
+requires "Displays have separate Spaces" to be on to stay scoped to that
+display. Senders older than this message ignore the unknown type, so the
+gesture simply does nothing.
 
 **`pencil`** (pv 3) carries `phase` (string): `"down"`, `"move"`, `"up"`,
 or `"hover"`; `x`, `y`: normalized position; `pressure` (number): 0 to 1;
@@ -798,6 +812,7 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 3 (additive) | `hello.videoCaps`, `displayMaxFrameRate`, and `streamConfig` (6.5); legacy peers remain implicit H.264 |
 | 3 (additive) | `hello.power` and `power` (6.6); direct cable only |
 | 3 (additive) | `hello.panel` (6.7); `pixelsWide/High/scale` deprecated, removed at the next bump |
+| 3 (additive) | `spaceSwitch` (6.1); unknown to older senders, which ignore it |
 | 4 (reserved) | Typed frame header replacing the section 4 demux heuristic (two-phase migration) |
 
 ---
