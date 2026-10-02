@@ -37,6 +37,8 @@ SPARKLE_NS = 'http://www.andymatuschak.org/xml-namespaces/sparkle'
 FEEDS = {'mac': 'public/openairdisplay-appcast.xml',
          'receiver': 'public/openairdisplay-appcast-receiver.xml'}
 IOS_MANIFEST = 'public/openairdisplay-ios-version.json'
+ALTSTORE_SOURCE = 'public/openairdisplay-altstore.json'
+IOS_MIN_VERSION = '15.0'
 PEM_NAME = 'OpenAirDisplay-code-signing.pem'
 BOT_NAME = 'github-actions[bot]'
 BOT_EMAIL = '41898282+github-actions[bot]@users.noreply.github.com'
@@ -463,6 +465,16 @@ def asset_names(env):
             'ios': 'OpenAirDisplay-iOS-unsigned-' + suffix + '.ipa'}
 
 
+def stable_ios_name():
+    """A version-free IPA name for installers that read the bundle ID from it.
+
+    SideStore compares the bundle ID inside the IPA with the file name stem
+    when a download URL is installed directly, so the same archive is also
+    published as <bundle id>.ipa under the fixed releases/latest URL.
+    """
+    return CONFIG['bundleIDs']['ios'] + '.ipa'
+
+
 def verify_checksums(assets):
     """Re-check every per-platform SHA256SUMS file produced on the runner."""
     digests = {}
@@ -652,6 +664,11 @@ def release_notes(env, names):
         ' upstream. Remove it if you do not want two copies.',
         '- The IPA is unsigned. Re-sign it with your own identity (for example with'
         ' Sideloadly or AltStore) before installing it on a device.',
+        '- AltStore, SideStore and LiveContainer can install and update it from'
+        ' this source: ' + RAW + REPO + '/main/' + ALTSTORE_SOURCE,
+        '- To paste a download URL straight into SideStore, use'
+        ' `' + stable_ios_name() + '`, the same IPA named after its bundle'
+        ' identifier; SideStore derives the expected bundle ID from the file name.',
         '',
         '## Checksums',
         '',
@@ -780,7 +797,37 @@ def render_appcast(path, env, role, row, asset):
                     + ET.tostring(root, encoding='unicode') + '\n')
 
 
-def feed_changes(env, names, rows):
+def altstore_version(env, ios):
+    tag = env['RELEASE_TAG']
+    return {'version': env['APP_VERSION'],
+            'buildVersion': env['APP_BUILD_NUMBER'],
+            'date': datetime.now(timezone.utc).replace(microsecond=0)
+                    .isoformat().replace('+00:00', 'Z'),
+            'localizedDescription': 'OpenAirDisplay ' + env['APP_VERSION']
+                                    + ' (build ' + env['APP_BUILD_NUMBER']
+                                    + '). Release notes: ' + GITHUB + REPO
+                                    + '/releases/tag/' + tag,
+            'downloadURL': download_url(tag, ios['name']),
+            'size': ios['size'],
+            'sha256': ios['sha256'],
+            'minOSVersion': IOS_MIN_VERSION}
+
+
+def render_altstore_source(path, env, ios):
+    """Prepend this build to the AltStore source, newest version first."""
+    data = json.loads(path.read_text())
+    app = data['apps'][0]
+    if app['bundleIdentifier'] != CONFIG['bundleIDs']['ios']:
+        raise SystemExit(path.name + ' describes ' + app['bundleIdentifier'])
+    entry = altstore_version(env, ios)
+    kept = [version for version in app.get('versions', [])
+            if (version.get('version'), version.get('buildVersion'))
+            != (entry['version'], entry['buildVersion'])]
+    app['versions'] = [entry] + kept[:MAX_FEED_ITEMS - 1]
+    path.write_text(json.dumps(data, indent=2) + '\n')
+
+
+def feed_changes(env, names, rows, ios):
     for role in ('mac', 'receiver'):
         render_appcast(ROOT / FEEDS[role], env, role, rows[role], names[role])
     manifest = ROOT / IOS_MANIFEST
@@ -788,7 +835,8 @@ def feed_changes(env, names, rows):
     data['ios']['recommendedVersion'] = env['APP_VERSION']
     data['ios']['storeURL'] = GITHUB + REPO + '/releases/latest'
     manifest.write_text(json.dumps(data, indent=2) + '\n')
-    return [FEEDS['mac'], FEEDS['receiver'], IOS_MANIFEST]
+    render_altstore_source(ROOT / ALTSTORE_SOURCE, env, ios)
+    return [FEEDS['mac'], FEEDS['receiver'], IOS_MANIFEST, ALTSTORE_SOURCE]
 
 
 def confirm_pushed_feeds(paths, commit):
@@ -803,13 +851,13 @@ def confirm_pushed_feeds(paths, commit):
     note('update feeds live on main at ' + commit)
 
 
-def update_feeds(env, names, rows, dry_run):
+def update_feeds(env, names, rows, ios, dry_run):
     message = ('release: OpenAirDisplay ' + env['RELEASE_TAG']
                + ' update feeds [skip ci]')
     for attempt in range(1, 4):
         run(['git', 'fetch', '--quiet', 'origin', 'main'])
         run(['git', 'checkout', '--force', '-B', 'openairdisplay-feeds', 'FETCH_HEAD'])
-        paths = feed_changes(env, names, rows)
+        paths = feed_changes(env, names, rows, ios)
         if not run(['git', 'status', '--porcelain', '--'] + paths):
             note('the update feeds already describe this build')
             return
@@ -864,9 +912,17 @@ def main():
         else:
             fail('Cannot verify ' + names[role] + ' without its archive and update row')
     ipa = assets / names['ios']
+    stable_ipa = assets / stable_ios_name()
+    ios = {'name': names['ios'], 'size': 0, 'sha256': ''}
     if check(ipa.is_file(), 'Missing ' + names['ios']):
         check_ios_archive(ipa, env)
-    uploads = [assets / names['mac'], assets / names['receiver'], ipa,
+        ios = {'name': names['ios'], 'size': ipa.stat().st_size,
+               'sha256': sha256_file(ipa)}
+        shutil.copyfile(ipa, stable_ipa)
+        check(sha256_file(stable_ipa) == ios['sha256'],
+              stable_ipa.name + ' is not a byte-for-byte copy of ' + ipa.name)
+        note(stable_ipa.name + ': bundle-identifier copy for direct URL installs')
+    uploads = [assets / names['mac'], assets / names['receiver'], ipa, stable_ipa,
                assets / PEM_NAME, assets / 'BUILD-INFO-macOS.txt',
                assets / 'BUILD-INFO-iOS.txt']
     for item in uploads:
@@ -884,7 +940,7 @@ def main():
     if options.skip_feeds:
         note('skipping the update feeds on request')
     else:
-        update_feeds(env, names, rows, options.dry_run)
+        update_feeds(env, names, rows, ios, options.dry_run)
     stop_if_unverified('after publishing; the release needs attention')
     print('Done: ' + env['RELEASE_TAG'], flush=True)
 

@@ -470,6 +470,21 @@ everything else works the same on every supported version.
   [testflight.apple.com/join/3NYaY11c](https://testflight.apple.com/join/3NYaY11c).
 - **Build from source**: open the project in Xcode, select your free Apple ID
   under Signing, hit Run. Takes ~2 minutes.
+- **AltStore, SideStore or LiveContainer** (this fork's builds): add this
+  source and install OpenAirDisplay from it. New releases show up as updates.
+
+  ```
+  https://raw.githubusercontent.com/nmt3325/openairdisplay/main/public/openairdisplay-altstore.json
+  ```
+
+  The IPA is unsigned, so the installer signs it with your own identity on the
+  device. To paste a download URL directly instead of using the source, take
+  the asset that is named after the bundle identifier — SideStore reads the
+  expected bundle ID from the file name and rejects the versioned name:
+
+  ```
+  https://github.com/nmt3325/openairdisplay/releases/latest/download/io.github.nmt3325.openairdisplay.ios.ipa
+  ```
 
 ## Quick start (from source)
 
