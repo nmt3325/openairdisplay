@@ -1,6 +1,6 @@
 import SwiftUI
 
-// `AppStore` (the App Store identity + deep link) lives in Shared/AppStore.swift
+// `ForkUpdates` (this fork's download/manifest URLs) lives in Shared/AppStore.swift
 // so the Mac can reference the same link when it asks the phone to update.
 
 // `PeerUpdateSignal` (what the connected Mac tells us about compatibility)
@@ -44,7 +44,7 @@ final class VersionGate: ObservableObject {
     private var remoteStatus: Status = .ok
     private var peerStatus: Status = .ok
 
-    private let manifestURL = URL(string: "https://opendisplay.app/ios-version.json")!
+    private let manifestURL = ForkUpdates.iOSManifestURL
 
     /// The running app's marketing version. Local/dev builds ship "0.0.0"
     /// (the project.yml default), which we treat as "skip the gate".
@@ -66,7 +66,7 @@ final class VersionGate: ObservableObject {
         else { return }   // fail open
 
         let policy = manifest.ios
-        let url = policy.storeURL.flatMap { URL(string: $0) } ?? AppStore.updateURL
+        let url = ForkUpdates.updateURL // Always keep fork updates on this repository.
 
         if let floor = policy.hardMinimumVersion, isVersion(current, olderThan: floor) {
             remoteStatus = .required(Update(message: policy.message ?? Self.requiredFallback, url: url))
@@ -119,9 +119,9 @@ final class VersionGate: ObservableObject {
     }
 
     private static let requiredFallback =
-        "This version of OpenDisplay is no longer supported. Update from the App Store to keep using your second display."
+        "This version of OpenAirDisplay is no longer supported. Download and re-sign the OpenAirDisplay IPA from GitHub to keep using your second display."
     private static let recommendedFallback =
-        "A newer version of OpenDisplay is available."
+        "A newer version of OpenAirDisplay is available."
 }
 
 /// Numeric dotted-version compare (e.g. "0.10.0" older than "0.11.0"). Missing
@@ -168,7 +168,7 @@ struct UpdateRequiredView: View {
             Button {
                 UIApplication.shared.open(update.url)
             } label: {
-                Label("Update on the App Store", systemImage: "arrow.down.circle")
+                Label("Download OpenAirDisplay", systemImage: "arrow.down.circle")
                     .font(.headline)
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 6)

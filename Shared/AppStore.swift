@@ -1,14 +1,9 @@
-// Compiled into BOTH targets. The iOS App Store listing — the numeric ID
-// otherwise lives only in the landing page (`src/App.tsx`). Centralized here so
-// the iOS app can deep-link to its own update page AND the Mac can hand the
-// same link to the phone in an `updateRequired` message.
-
+// Update destinations for this fork. No upstream App Store/site identity is used.
 import Foundation
 
-enum AppStore {
-    static let iOSAppID = "6780264891"
-    /// Opens the App Store app directly on the listing (with an Update button).
-    static let updateURL = URL(string: "itms-apps://apps.apple.com/app/id\(iOSAppID)")!
-    /// Web fallback for anywhere the itms-apps scheme can't be handled.
-    static let webURL = URL(string: "https://apps.apple.com/app/id\(iOSAppID)")!
+enum ForkUpdates {
+    static let repositoryURL = URL(string: "https://github.com/nmt3325/openairdisplay")!
+    static let updateURL = URL(string: "https://github.com/nmt3325/openairdisplay/releases/latest")!
+    static let webURL = updateURL
+    static let iOSManifestURL = URL(string: "https://raw.githubusercontent.com/nmt3325/openairdisplay/main/public/openairdisplay-ios-version.json")!
 }

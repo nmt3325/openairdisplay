@@ -1,27 +1,60 @@
-name: Fork release builds
-run-name: Fork ${{ inputs.app_version }} @ ${{ inputs.source_sha }}
+name: OpenAirDisplay release
+run-name: OpenAirDisplay ${{ inputs.release_tag || github.ref_name }}
 
 on:
+  push:
+    tags: ['p2p-wifi-*']
   workflow_dispatch:
     inputs:
       source_sha:
-        description: Full commit SHA to build (not a moving branch)
-        required: true
+        description: Commit SHA (blank uses the selected ref)
         type: string
       app_version:
-        description: Numeric app version
-        required: true
-        default: '1.22.0'
+        description: Numeric app version (blank uses config.json)
         type: string
+      release_tag:
+        description: New release tag
+        required: true
+        default: p2p-wifi-1.2
+        type: string
+      publish:
+        description: Publish release and update feeds after verification
+        default: true
+        type: boolean
 
 permissions:
   contents: read
 concurrency:
-  group: fork-build-${{ inputs.source_sha }}
+  group: openairdisplay-fork-release
   cancel-in-progress: false
 
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      source_sha: ${{ steps.resolve.outputs.source_sha }}
+      app_version: ${{ steps.resolve.outputs.app_version }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.source_sha || github.sha }}
+      - id: resolve
+        env:
+          REQUESTED_VERSION: ${{ inputs.app_version }}
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          [[ "$GITHUB_REPOSITORY" == nmt3325/openairdisplay ]]
+          version="${REQUESTED_VERSION:-$(python3 -c 'import json; print(json.load(open(".github/fork-release/config.json"))["appVersion"])')}"
+          tag="${REQUESTED_TAG:-$GITHUB_REF_NAME}"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$tag" =~ ^p2p-wifi-[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]
+          echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "app_version=$version" >> "$GITHUB_OUTPUT"
+          echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
   build:
+    needs: prepare
     runs-on: macos-26
     strategy:
       fail-fast: false
@@ -30,15 +63,22 @@ jobs:
     steps:
       - uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.source_sha }}
+          ref: ${{ needs.prepare.outputs.source_sha }}
           persist-credentials: false
       - name: Install XcodeGen
         run: brew install xcodegen
-      - name: Build and verify release artifacts
+      - name: Import persistent signing identity and update key
+        if: matrix.platform == 'macOS'
         env:
-          APP_VERSION: ${{ inputs.app_version }}
+          MAC_P12: ${{ secrets.OPENAIRDISPLAY_MAC_SIGNING_P12 }}
+          MAC_P12_PASSWORD: ${{ secrets.OPENAIRDISPLAY_MAC_SIGNING_PASSWORD }}
+          SPARKLE_PRIVATE_KEY: ${{ secrets.OPENAIRDISPLAY_SPARKLE_PRIVATE_KEY }}
+        run: bash .github/fork-release/setup-signing.sh
+      - name: Build, sign and verify release artifacts
+        env:
+          APP_VERSION: ${{ needs.prepare.outputs.app_version }}
           APP_BUILD_NUMBER: ${{ github.run_number }}
-          SOURCE_SHA: ${{ inputs.source_sha }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
           PLATFORM: ${{ matrix.platform }}
         run: bash .github/fork-release/build.sh "$PLATFORM"
       - uses: actions/upload-artifact@v4
@@ -47,6 +87,7 @@ jobs:
           path: dist/*
           if-no-files-found: error
           compression-level: 0
+          overwrite: true
       - name: Upload build logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -54,3 +95,32 @@ jobs:
           name: fork-release-logs-${{ matrix.platform }}
           path: ${{ runner.temp }}/openairdisplay-*.log
           if-no-files-found: ignore
+          overwrite: true
+      - name: Remove temporary private keys
+        if: always() && matrix.platform == 'macOS'
+        run: |
+          security delete-keychain "$RUNNER_TEMP/openairdisplay-private/signing.keychain-db" || true
+          rm -rf "$RUNNER_TEMP/openairdisplay-private"
+  publish:
+    needs: [prepare, build]
+    if: github.event_name == 'push' || inputs.publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.prepare.outputs.source_sha }}
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: fork-release-*
+          merge-multiple: true
+          path: release-assets
+      - name: Publish verified fork release and signed update feeds
+        env:
+          GH_TOKEN: ${{ github.token }}
+          APP_VERSION: ${{ needs.prepare.outputs.app_version }}
+          APP_BUILD_NUMBER: ${{ github.run_number }}
+          SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+        run: python3 .github/fork-release/publish.py release-assets

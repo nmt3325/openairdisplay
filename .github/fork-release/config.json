@@ -1,0 +1,13 @@
+{
+  "appVersion": "1.22.0",
+  "macSigningSHA1": "031281e8158589eeb20a535fd08fe644095c64dc",
+  "macSigningSHA256": "eea403c095bc0822cf522c34469460f529c49e7ccae934bbbbca0f3385a37194",
+  "sparklePublicKey": "tlUj0CgwzKFZgG4rZowjoO6gXxxjfGeHgaBGFRwOXCU=",
+  "sparkleVersion": "2.10.0",
+  "bundleIDs": {
+    "mac": "io.github.nmt3325.openairdisplay.mac",
+    "receiver": "io.github.nmt3325.openairdisplay.mac.receiver",
+    "ios": "io.github.nmt3325.openairdisplay.ios"
+  },
+  "sparkleToolsSHA256": "c2bf58aa8387266ac179357b1415d6f2635f044da8be41042af32425dae6da0c"
+}

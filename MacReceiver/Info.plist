@@ -27,14 +27,14 @@
 		<string>_opensidecar._tcp</string>
 	</array>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>OpenDisplay Receiver advertises itself on the local network so another Mac can connect and use this Mac as a display.</string>
+	<string>OpenAirDisplay Receiver advertises itself on the local network so another Mac can connect and use this Mac as a display.</string>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
 	<key>SUFeedURL</key>
-	<string>https://opendisplay.app/appcast-receiver.xml</string>
+	<string>https://raw.githubusercontent.com/nmt3325/openairdisplay/main/public/openairdisplay-appcast-receiver.xml</string>
 	<key>SUPublicEDKey</key>
-	<string>rYxlIePmwzi2bRo/qIsuY2TqTnQ34li2gQhJpGBiumw=</string>
+	<string>tlUj0CgwzKFZgG4rZowjoO6gXxxjfGeHgaBGFRwOXCU=</string>
 </dict>
 </plist>

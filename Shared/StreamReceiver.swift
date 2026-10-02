@@ -1,4 +1,4 @@
-// StreamReceiver — the listening half of OpenDisplay: receive H.264 over
+// StreamReceiver — the listening half of OpenAirDisplay: receive H.264 over
 // TCP and display it. Compiled into BOTH targets (see project.yml): it is
 // the iOS app's core, and the Mac app's receiver mode (issue #82) reuses it
 // unchanged to turn a spare Mac into a display.
@@ -230,7 +230,7 @@ final class StreamReceiver: ObservableObject {
     // needs an entitlement Apple gates behind approval and personal teams
     // can't get), so this is user-editable in Settings. The USB picker gets
     // the real name host-side via lockdownd regardless.
-    var serviceName = "OpenDisplay"
+    var serviceName = "OpenAirDisplay"
 
     // Platform identity, injected at init so this file stays UI-framework-free.
     /// "iPhone" / "iPad" / "Mac" — announced in the hello (the sender names
@@ -891,7 +891,7 @@ final class StreamReceiver: ObservableObject {
                 self.macProtocolVersion = macPV
             }
             if macPV < WireProtocol.minSupportedPeer {
-                let msg = "The OpenDisplay app on your Mac is too old for this \(deviceKind) app. Update OpenDisplay on your Mac to reconnect."
+                let msg = "The OpenAirDisplay app on your Mac is too old for this \(deviceKind) app. Update OpenAirDisplay on your Mac to reconnect."
                 DispatchQueue.main.async { self.peerSignal = .updateMac(message: msg) }
             }
         case WireMessage.streamConfig:
@@ -910,8 +910,8 @@ final class StreamReceiver: ObservableObject {
         case WireMessage.updateRequired:
             // The Mac refuses this pairing until we update from the App Store.
             let message = obj["message"] as? String
-                ?? "Update OpenDisplay from the App Store to keep using your second display."
-            let store = (obj["store"] as? String).flatMap { URL(string: $0) } ?? AppStore.updateURL
+                ?? "Download and re-sign the OpenAirDisplay IPA from GitHub to keep using your second display."
+            let store = ForkUpdates.updateURL // A peer cannot redirect this fork to upstream.
             DispatchQueue.main.async { self.peerSignal = .updateReceiver(message: message, storeURL: store) }
         default:
             break
