@@ -1,5 +1,48 @@
 # Changelog
 
+## [1.25.0](https://github.com/peetzweg/opendisplay/compare/v1.24.0...v1.25.0) (2026-10-01)
+
+
+### Features
+
+* **ios:** tidy idle screen, rate prompt and About links ([#350](https://github.com/peetzweg/opendisplay/issues/350)) ([472e785](https://github.com/peetzweg/opendisplay/commit/472e785a619e71373d4dfd9205ee13d100ac0da4))
+* **mac:** per-device Display size on the sender ([#347](https://github.com/peetzweg/opendisplay/issues/347)) ([a930071](https://github.com/peetzweg/opendisplay/commit/a9300712e97185608b21b7e8a12bf5e7f35fdbbd))
+* **mac:** sender decides the desktop from hello.panel ([#345](https://github.com/peetzweg/opendisplay/issues/345)) ([f0d211a](https://github.com/peetzweg/opendisplay/commit/f0d211a0615c4adef31d57fb88a836c18c4af891))
+
+
+### Bug Fixes
+
+* **mac:** Display size popover hugs its content, captions show only the size ([#352](https://github.com/peetzweg/opendisplay/issues/352)) ([b3c909a](https://github.com/peetzweg/opendisplay/commit/b3c909adbf2e13710718cbec7f371d068e5d5be4))
+* **mac:** keep small iPhones at 2x with the macOS minimum ([#346](https://github.com/peetzweg/opendisplay/issues/346)) ([d24afad](https://github.com/peetzweg/opendisplay/commit/d24afad70333cd83b14412305522b8ee62c30db0))
+
+## [1.24.0](https://github.com/peetzweg/opendisplay/compare/v1.23.0...v1.24.0) (2026-09-30)
+
+
+### Features
+
+* **mac:** auto-connect a Mac receiver when the cable is plugged in ([#338](https://github.com/peetzweg/opendisplay/issues/338)) ([42ad6fb](https://github.com/peetzweg/opendisplay/commit/42ad6fbdb4b9f9f1da29d11afd60b44cf7628cd4))
+* **receiver:** shut down a cabled Mac receiver from the sender ([#332](https://github.com/peetzweg/opendisplay/issues/332)) ([d2dfb3f](https://github.com/peetzweg/opendisplay/commit/d2dfb3f744d020f66f60956c52ed4f4dc7c4a3b2))
+
+
+### Bug Fixes
+
+* **mac:** show Retry only on a failed session ([#335](https://github.com/peetzweg/opendisplay/issues/335)) ([c27e538](https://github.com/peetzweg/opendisplay/commit/c27e538c0cb86b075e7129a176a163654627efe4))
+
+## [1.23.0](https://github.com/peetzweg/opendisplay/compare/v1.22.1...v1.23.0) (2026-09-30)
+
+
+### Features
+
+* **video:** use HEVC automatically when both sides support it in hardware ([#325](https://github.com/peetzweg/opendisplay/issues/325)) ([91ca272](https://github.com/peetzweg/opendisplay/commit/91ca272debd4615d134f18a5bc98f0ef8a236544))
+
+## [1.22.1](https://github.com/peetzweg/opendisplay/compare/v1.22.0...v1.22.1) (2026-09-29)
+
+
+### Bug Fixes
+
+* **mac:** capture the virtual display 1:1 when the stream is smaller than the panel ([#323](https://github.com/peetzweg/opendisplay/issues/323)) ([f244d63](https://github.com/peetzweg/opendisplay/commit/f244d63025d66fd8dcfbddffc2beceab0eb43ee2)), closes [#322](https://github.com/peetzweg/opendisplay/issues/322)
+* **mac:** keep the session through display sleep and screen lock ([#320](https://github.com/peetzweg/opendisplay/issues/320)) ([09e717e](https://github.com/peetzweg/opendisplay/commit/09e717edf3ed795869fc8c5a5b094dabb95701d6))
+
 ## [1.22.0](https://github.com/peetzweg/opendisplay/compare/v1.21.0...v1.22.0) (2026-09-23)
 
 

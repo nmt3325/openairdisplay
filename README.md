@@ -41,6 +41,13 @@ See [Connecting without a local network](#connecting-without-a-local-network)
 for how it works and what it needs. Everything else — USB mode, touch input,
 HiDPI, multi-device — behaves exactly as upstream.
 
+Each release is built from one upstream release and carries its number with an
+`-air` suffix, so `v1.25.0-air` is upstream v1.25.0 plus this fork's changes.
+The apps have their own bundle identifiers, their own Sparkle feeds and their
+own signing certificate, so they install next to OpenDisplay rather than
+replacing it. Downloads are on the
+[releases page](https://github.com/nmt3325/openairdisplay/releases/latest).
+
 ## Why OpenDisplay exists
 
 Turning an iPhone or iPad into an external display for a Mac is a solved
@@ -74,7 +81,7 @@ pipeline, USB transport, input injection) are already working.
   like a trackpad. (Apple Pencil support is on the roadmap.)
 - 🔄 **Portrait or landscape** — rotate the device and the virtual display
   rebuilds itself as a vertical monitor at native resolution.
-- ⚡ **Low-latency pipeline** — hardware H.264 encode (VideoToolbox,
+- ⚡ **Low-latency pipeline** — hardware H.264 or HEVC encode (VideoToolbox,
   real-time mode, no B-frames), TCP_NODELAY, frame-drop backpressure with
   keyframe recovery, decode-and-render via `AVSampleBufferDisplayLayer`.
 - 💻 **A spare Mac as a display** — install the small *OpenDisplay
@@ -85,15 +92,45 @@ pipeline, USB transport, input injection) are already working.
 
 ## Comparison
 
+OpenDisplay is open source, so you can audit exactly what runs on your Mac
+and build it yourself.
+
 | | OpenDisplay | Apple Sidecar | Duet Display | Luna Display |
 |---|---|---|---|---|
 | Price | **Free, open source** | Free | Subscription | $$$ + dongle |
-| iPhone as display | ✅ | ❌ (iPad only) | ✅ | ✅ |
+| iPhone as display | ✅ | ❌ (iPad only) | ✅ | ❌ (iPad only) |
+| Mac as display | ✅ | ❌ | ✅ | ✅ |
 | Different Apple IDs | ✅ | ❌ | ✅ | ✅ |
-| Wired (USB) | ✅ | ✅ | ✅ | ❌ |
-| True extension | ✅ | ✅ | ✅ | ✅ |
-| Touch input | ✅ | ✅ | ✅ | ✅ |
-| Self-hosted / auditable | ✅ | — | ❌ | ❌ |
+| No account / sign-up | ✅ | Apple ID | ❌ | ? |
+| Wired (USB) | ✅ | ✅ | ✅ | ✅ |
+| Open source | ✅ | ❌ | ❌ | ❌ |
+
+### A spare Mac as the display
+
+For a Mac receiver, the closest Apple feature is AirPlay to Mac, not Sidecar.
+Luna and Duet both have Mac-to-Mac modes. A few newer apps target only this
+use case, mostly a 5K iMac next to an Apple silicon laptop.
+
+| | OpenDisplay | [AirPlay to Mac](https://support.apple.com/guide/mac-help/use-airplay-to-stream-to-a-mac-mchl15c9e4b5/mac) | [Luna Display](https://astropad.com/product/lunadisplay/) | [Duet Air](https://www.duetdisplay.com/) | [TargetBridge](https://github.com/swellweb/targetBridge) | [Sharp](https://github.com/amineross/sharp) | [RetinaRelay](https://www.retinarelay.com/) |
+|---|---|---|---|---|---|---|---|
+| Price | **Free, open source** (GPLv3) | Free | $89.99 + dongle | Subscription | Free, open source (MIT) | Free, open source (GPLv3) | $49 one-time |
+| Receiving Mac | macOS 12+ | iMac 2019+, MacBook 2018+ | macOS 10.13+ | macOS 10.14.6+ | macOS 11+ | macOS 10.15+ | iMac 2012+, macOS 10.15+ |
+| Intel Mac as sender | ✅ | 2018+ | ✅ | ✅ | ❌ (Apple silicon only) | ✅ | ✅ |
+| Wi-Fi | ✅ | ✅ | ✅ | ✅ | Experimental | ❌ | Fallback |
+| Cable | ✅ Thunderbolt, USB-C, Ethernet | ✅ USB | ✅ | ? | ✅ Thunderbolt | ✅ Ethernet only | ✅ Thunderbolt, USB 3, Ethernet |
+| Native 5K on a 5K iMac | ✅ ~30 fps | ? | ✅ | ? | ✅ 48 fps (60 experimental) | Experimental (1440p default) | ✅ 60 fps |
+| Different Apple IDs, no account | ✅ | Same Apple ID for full quality | ✅ | ❌ (account) | ✅ | ✅ | ✅ |
+| Several receiving Macs | ✅ | ? | ? | ✅ | ✅ | ? | ? |
+| Keyboard and mouse at the receiving Mac | ❌ ([planned](https://github.com/peetzweg/opendisplay/issues/16)) | ❌ | ✅ | ✅ | ✅ | ? | ? |
+| Audio | ❌ | ✅ | ? | ? | ✅ | ✅ | ✅ |
+| Shut down the receiving Mac from the sender | ✅ over a cable | ? | ? | ? | ? | ? | ? |
+| iPhone and iPad as displays too | ✅ | ❌ | iPad only | ✅ | ❌ | ❌ | ❌ |
+
+? means the project does not document it. Figures come from each project's own site or README
+as of October 2026. Also in this space: [MacDisplay](https://macdisplay.it)
+(paid), [Phoenix Display](https://fablab503-collab.github.io/PhoenixDisplay/)
+(new; the App Store version mirrors only), and Apple's Target Display Mode,
+which only works on non-Retina iMacs from 2009 to 2014.
 
 ## FAQ
 
@@ -114,7 +151,7 @@ iPhone app open in the foreground. USB mode is unaffected.
 charge-only USB cable will **not** work. Look for a cable described as a
 *data*, *sync*, or *charging and data-transfer* cable. A data-capable USB 2.0
 cable is enough; USB 3, Thunderbolt, and video Alt Mode are not required.
-OpenDisplay streams H.264 over a TCP connection through macOS's built-in
+OpenDisplay streams video over a TCP connection through macOS's built-in
 `usbmuxd`, not as a USB video device. Its highest-quality preset uses 18 Mb/s,
 well below USB 2.0's 480 Mb/s high-speed link rate, so USB 2.0 has ample
 bandwidth for the stream. USB 1.x is not supported or tested. For best
@@ -143,35 +180,102 @@ Thunderbolt 2 cable.
 Input from the receiving Mac's keyboard and mouse is a follow-up
 ([#147](https://github.com/peetzweg/opendisplay/issues/147)).
 
-**Do the Larger Text / More Space display settings affect Mac receiver performance?**
-Yes, in Extend mode. On a Mac receiver, this setting changes the logical size
-of the desktop, not only the apparent text size. OpenDisplay advertises that
-desktop at Retina scale, and the sender creates, renders, captures, and encodes
-a virtual display with the same working area. **More Space** therefore gives
-you room for more windows, but starts with a larger source surface and puts
-more pressure on rendering, capture, scaling, encoding, and the network. At a
-fixed bitrate it also gives each pixel less data. Moving toward **Larger Text**
-reduces that work and can be noticeably smoother, especially over WiFi.
+**Which settings give the best picture?** Out of the box OpenDisplay already
+picks the sharpest setup it can, so you rarely need to change anything. The
+defaults are: sender on **Best**, receiver at its **Default** display
+setting, and video filling the receiver's screen (fullscreen). If you want to
+tune it, four things matter.
 
-For example, on the 5K iMac used for testing, the less-spacious setting offers
-a 1600×900-point desktop and a 3200×1800 stream at up to 60 fps. More Space
-offers a 3200×1800-point desktop, which is rendered at 6400×3600; the current
-H.264 path safely scales that to 4096×2304 at up to 55 fps. That is about 50%
-more encoded pixels per second, in addition to the four-times-larger source
-surface. Exact sizes vary by Mac.
+*1. The connection.* A cable gives steadier latency than WiFi, but it does not
+need to be fast: the stream uses at most 18 Mb/s.
 
-Start with the receiver's **Default** setting. Move one or more steps toward
-**Larger Text** when smoothness and latency matter most, or toward **More
-Space** when desktop area matters and you have a fast wired connection. The
-sender's Best/Balanced/Fast setting can reduce the transmitted image further
-without changing the desktop's working area. Fullscreen changes presentation
-and compositor load, but not the negotiated stream resolution. In Mirror mode,
-the sending Mac's display determines the capture resolution, so the receiver's
-display setting has much less effect.
+- iPhone or iPad: any USB data cable (see the USB question above).
+- Mac receiver: a Thunderbolt or USB4 cable, Ethernet, or a USB-C data cable
+  (see *Can another Mac be the display?*). The picture is the same over any of
+  them; a Thunderbolt cable is not sharper than a USB-C data cable.
+- WiFi works well for documents and slower motion. Expect a little more
+  latency and the occasional hitch when the network is busy. 5 GHz or 6 GHz
+  and a nearby access point help. If motion stutters, try **Fast**.
+- On WiFi, set AirDrop on the sending Mac to **Contacts Only** or **No One**
+  (Control Center, AirDrop). With **Everyone**, the Mac's WiFi pauses for about
+  75 ms twice a second to look for nearby devices, and the picture hitches each
+  time. In our measurements this one setting removed almost all WiFi hitches.
 
-**Why H.264 and not HEVC/AV1?** Hardware H.264 encode/decode is universally
-fast and the latency is excellent. HEVC is a planned option for better
-quality-per-bit.
+*2. The sender's quality setting.* **Best** sends the full resolution.
+**Balanced** and **Fast** send fewer pixels: the image is softer, but encoding
+is faster, so motion is smoother and latency lower. The desktop's size stays
+the same.
+
+*3. Display size,* per device, in the sender's device list (the arrows
+button next to Disconnect): **Larger Text**, **Default**, **More Space** or
+**Native (1x)**. Each choice shows the exact desktop size it gives, like
+macOS's own Displays settings. More Space and Native look a little softer
+when the receiver cannot show that many pixels 1:1. The choice is remembered
+per device across reconnects, cable or WiFi, and rotation. Changing the
+virtual display's resolution in System Settings does not stick (OpenDisplay
+puts its own size back); use Display size instead.
+
+*4. The receiving Mac's display setting* (Larger Text … More Space). In
+Extend mode this sets the default size of the extended desktop, which OpenDisplay
+renders at Retina scale and sends 1:1, up to the largest stream the codec
+allows:
+
+- **HEVC**: up to 5120×2880. It is used when the sending Mac has Apple
+  silicon and the receiving Mac decodes HEVC in hardware (Apple silicon, and
+  most Intel Macs from 2017 on).
+- **H.264**: up to 4096×2304, used otherwise. On a 5K iMac that means a
+  2048×1152-point desktop even at Default.
+- **Non-Retina panels** (a 2013 iMac at 2560×1440, a 1080p display): the
+  desktop is the panel's own size at 1x and goes out 1:1 at 60 fps with
+  either codec, exactly like that Mac's own desktop.
+
+**More Space** gives the extended desktop that much room too, but beyond
+those caps the picture is no longer 1:1: it is scaled once on the sender, so
+text is a little softer. Settings toward **Larger Text** send fewer pixels
+and are smoother.
+
+Measured with an M5 Pro MacBook Pro sending to a 2017 5K iMac over a cable
+(HEVC, moving content; latency is capture to display):
+
+| iMac display setting | Sender | Desktop | Video sent | Motion | Latency |
+| --- | --- | --- | --- | ---: | ---: |
+| Default | Best | 2560×1440 | 5120×2880, 1:1 | ~30 fps | ~30 ms |
+| Default | Balanced | 2560×1440 | 3840×2160 | ~32 fps | ~20 ms |
+| Default | Fast | 2560×1440 | 2560×1440 | ~58 fps | ~12 ms |
+| 2048×1152 | Best | 2048×1152 | 4096×2304, 1:1 | ~31 fps | ~20 ms |
+| 1600×900 | Best | 1600×900 | 3200×1800, 1:1 | ~55 fps | ~15 ms |
+| 3200×1800 | Best | 3200×1800 | 5120×2880, scaled | ~29 fps | ~33 ms |
+
+So on that pair:
+
+- **Reading, writing and code**: Default + Best. It is the sharpest and gives
+  the full desktop. Motion is limited to about 30 fps by the sender's encoder.
+- **Sharp and smooth**: one or two steps toward Larger Text (1600×900 on a 5K
+  iMac) + Best. Text stays crisp and larger, at close to 60 fps.
+- **Video and fast animation**: Default + Fast, which is softer but smooth.
+- **2048×1152 no longer helps with HEVC**: it runs at the same rate as
+  Default with less room.
+
+Other pairs behave the same way with different numbers. A newer or larger
+Apple silicon chip encodes faster; an M1 Pro manages about 23 fps at 5K.
+Receivers with a 4K-or-smaller panel get their full resolution 1:1 with
+either codec and run faster. If the receiver shows the video in a window
+instead of fullscreen, the picture is scaled once more and looks softer. In
+Mirror mode, the sending Mac's display sets the resolution, so the receiver's
+display setting has little effect. Measurements and the tools behind them:
+[research/hevc-m5-2026-09-29](research/hevc-m5-2026-09-29/README.md),
+[tools/quality](tools/quality/README.md).
+
+**Why H.264 and HEVC, and not AV1?** Both have fast hardware encode and
+decode, and the latency is excellent. At the same resolution they run at the
+same frame rate on Apple silicon, but HEVC is sharper right after a window
+change and holds detail much better on a slow link. It is also the only way to
+send a 5K panel 1:1. So OpenDisplay uses HEVC whenever both Macs support it in
+hardware and falls back to H.264 everywhere else, with nothing to configure.
+iPhones and iPads with an A9 chip or later decode HEVC too. Colour detail is
+the same with both, because both send colour at a quarter of the resolution
+(4:2:0); fuller colour is tracked in
+[#322](https://github.com/peetzweg/opendisplay/issues/322).
 
 **Is my screen content sent anywhere?** No. One direct TCP connection
 between your Mac and your device, over your cable or your LAN. No servers,
@@ -224,7 +328,7 @@ ship for any of these platforms later.
 MAC (sender)                                      iPHONE / iPAD (receiver)
 CGVirtualDisplay  ← macOS believes a monitor is attached
    → ScreenCaptureKit (capture the virtual display)
-   → VideoToolbox H.264 (hardware, real-time)
+   → VideoToolbox H.264 or HEVC (hardware, real-time)
    → TCP  [4-byte length][Annex B frame]  ═══════→  NWListener :9000
                                                       → AVSampleBufferDisplayLayer
    ← JSON control messages (hello, touch, scroll) ═══

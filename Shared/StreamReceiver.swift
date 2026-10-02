@@ -1,4 +1,4 @@
-// StreamReceiver — the listening half of OpenAirDisplay: receive H.264 over
+// StreamReceiver — the listening half of OpenAirDisplay: receive video over
 // TCP and display it. Compiled into BOTH targets (see project.yml): it is
 // the iOS app's core, and the Mac app's receiver mode (issue #82) reuses it
 // unchanged to turn a spare Mac into a display.
@@ -37,7 +37,9 @@ struct PerfStats: Equatable {
     var encodeP50 = 0.0          // Mac-side capture→socket (encode + queue)
     var rttMs = 0.0              // control-channel round trip
     var e2eSamples: [Double] = []  // last ~120 per-frame e2e latencies, ms
-    var transport = "—"          // USB (usbmux loopback), WiFi (LAN) or AWDL
+    var transport = "—"          // USB (usbmux loopback), Cable (direct link), AWDL or WiFi
+    var codec = ""               // "H.264" or "HEVC" once a stream is known
+    var hitches = 0              // gaps over 1.5x the median interval (last ~120 frames)
     var cursorPerSec = 0         // cursor position updates applied (this window)
     var cursorLost = 0           // UDP cursor datagrams missing or reordered (this window)
     var macDrops = 0             // enc + net drops (legacy total)
@@ -119,6 +121,14 @@ final class StreamReceiver: ObservableObject {
     // receivers put addrs in their hello — see sendHello for why phones
     // must not.
     private var advertisesAddresses: Bool { deviceKind == "Mac" }
+    /// Power actions this platform can carry out (PROTOCOL.md 6.6); empty
+    /// on platforms that cannot power off (iOS). Set before start(). Offered
+    /// in hello, and obeyed, only on a direct-cable session until pairing
+    /// exists: anything on the LAN can reach the listener, the cable cannot
+    /// be faked from the far end.
+    var powerActions: [PowerAction] = []
+    /// Called on the main thread once a power action passed the gate.
+    var onPowerAction: ((PowerAction) -> Void)?
     private var lastCursorSeq: UInt64 = 0
     // Cursor channel health for the HUD/stats: how many positions landed and
     // how many datagrams never did (sequence gaps + reordered drops). A
@@ -130,6 +140,11 @@ final class StreamReceiver: ObservableObject {
     private let queue = DispatchQueue(label: "receiver.video")
     private var buffer = Data()
     private var formatDesc: CMVideoFormatDescription?
+    #if DEBUG
+    private let idleFrameDumper = IdleFrameDumper.makeIfEnabled()
+    #endif
+    private var streamCodec = "h264"
+    private var vps: Data?
     private var sps: Data?
     private var pps: Data?
 
@@ -224,6 +239,10 @@ final class StreamReceiver: ObservableObject {
     private(set) var devicePixelsWide = 0
     private(set) var devicePixelsHigh = 0
     var deviceScale: Double = 2
+    /// `hello.panel` (PROTOCOL.md 6.7): physical pixels, real scale and, on a
+    /// Mac, its own desktop size, in the current orientation. nil derives it
+    /// from the legacy fields above, which are the panel's facts on iOS.
+    private var panelOverride: PanelAnnouncement?
     private var displayMaxFrameRate = 60
     // Name advertised over Bonjour for the Mac's WiFi picker. iOS 16+ returns
     // a generic "iPhone" from UIDevice.current.name (the user-assigned name
@@ -239,8 +258,13 @@ final class StreamReceiver: ObservableObject {
     // Decode ceiling advertised in hello (PROTOCOL.md 6.5): the largest
     // stream this machine can actually sustain, which a big panel says
     // nothing about. nil = advertise nothing (sender streams full size).
-    private let maxEncodeWide: Int?
-    private let maxEncodeHigh: Int?
+    /// HEVC decode offer (PROTOCOL.md 6.6); nil advertises H.264 only. The
+    /// platform app decides, from its hardware decoder and tested limits.
+    /// In the current orientation (PROTOCOL.md 6.5): a rotating receiver
+    /// swaps them through `setDecodeLimits`.
+    private var hevcCapability: VideoCapability?
+    private var maxEncodeWide: Int?
+    private var maxEncodeHigh: Int?
     /// Decoder throughput ceiling advertised in `hello.videoCaps`
     /// (PROTOCOL.md 6.5). The sender keeps the raster and lowers the frame
     /// rate to stay under it. nil = advertise none.
@@ -305,13 +329,38 @@ final class StreamReceiver: ObservableObject {
     /// and again whenever it changes (iOS rotation via setOrientation, macOS
     /// display-mode changes) — a live connection re-sends hello so the sender
     /// rebuilds the virtual display for the new dimensions.
-    func setPanel(pixelsWide w: Int, pixelsHigh h: Int, scale: Double) {
-        deviceScale = scale
-        guard w > 0, h > 0, w != devicePixelsWide || h != devicePixelsHigh else { return }
+    /// `panel` is announced as `hello.panel` when the legacy fields are not
+    /// the panel's facts (a Mac receiver); a change of any value re-sends.
+    /// `limitsChanged` re-sends even when the panel did not change (see
+    /// `setDecodeLimits`).
+    func setPanel(pixelsWide w: Int, pixelsHigh h: Int, scale: Double,
+                  panel: PanelAnnouncement? = nil, limitsChanged: Bool = false) {
+        guard w > 0, h > 0,
+              w != devicePixelsWide || h != devicePixelsHigh || scale != deviceScale
+                || panel != panelOverride || limitsChanged
+        else { return }
         devicePixelsWide = w
         devicePixelsHigh = h
-        Log.info("panel changed -> \(w)x\(h) @\(scale)x")
+        deviceScale = scale
+        panelOverride = panel
+        Log.info("panel changed -> \(w)x\(h) @\(scale)x"
+            + (panel.map { " (panel \($0))" } ?? ""))
         if let connection { sendHello(on: connection) }
+    }
+
+    /// Decode limits in the current orientation (PROTOCOL.md 6.5). Does not
+    /// send: a rotation changes the limits and the panel together, so the
+    /// caller passes the result to `setPanel`, which sends one consistent
+    /// hello. Returns whether anything changed.
+    @discardableResult
+    func setDecodeLimits(maxEncodeWide wide: Int?, maxEncodeHigh high: Int?,
+                         hevc: VideoCapability?) -> Bool {
+        guard wide != maxEncodeWide || high != maxEncodeHigh || hevc != hevcCapability
+        else { return false }
+        maxEncodeWide = wide
+        maxEncodeHigh = high
+        hevcCapability = hevc
+        return true
     }
 
     /// Hardware decode budget in encoded pixels per second, for silicon that
@@ -333,8 +382,10 @@ final class StreamReceiver: ObservableObject {
 
     init(displayLayer: AVSampleBufferDisplayLayer, deviceKind: String,
          fallbackServiceName: String,
-         maxEncodeWide: Int? = nil, maxEncodeHigh: Int? = nil) {
+         maxEncodeWide: Int? = nil, maxEncodeHigh: Int? = nil,
+         hevcCapability: VideoCapability? = nil) {
         self.displayLayer = displayLayer
+        self.hevcCapability = hevcCapability
         self.deviceKind = deviceKind
         self.fallbackServiceName = fallbackServiceName
         self.maxEncodeWide = maxEncodeWide
@@ -694,7 +745,7 @@ final class StreamReceiver: ObservableObject {
                 self.listenerStarting = false
                 self.listenerHealthy = true
                 self.restartBackoff = 0.5
-                self.setStatus("Listening on :\(self.port)")
+                self.setStatus("Ready to connect")
             case .waiting(let error):
                 // Transient: the interface (awdl0 on the peer-to-peer path)
                 // isn't up yet. Network framework retries on its own, so
@@ -756,6 +807,12 @@ final class StreamReceiver: ObservableObject {
                 if let link = conn.peerToPeerWiFiInterfaceName {
                     self.transport = "AWDL"
                     Log.info("link: Apple peer-to-peer WiFi (\(link))")
+                } else if let path = conn.currentPath {
+                    // Non-loopback is WiFi only if the path says so: a Mac
+                    // receiver on a Thunderbolt Bridge or USB-C peer link is a
+                    // cable too.
+                    self.transport = path.usesInterfaceType(.wifi) ? "WiFi" : "Cable"
+                    Log.info("link: \(self.transport == "WiFi" ? "local network" : "direct cable")")
                 } else {
                     self.transport = "WiFi"
                     Log.info("link: local network")
@@ -891,22 +948,38 @@ final class StreamReceiver: ObservableObject {
                 self.macProtocolVersion = macPV
             }
             if macPV < WireProtocol.minSupportedPeer {
-                let msg = "The OpenAirDisplay app on your Mac is too old for this \(deviceKind) app. Update OpenAirDisplay on your Mac to reconnect."
+                let msg = "The OpenAirDisplay app on the connecting computer is too old for this \(deviceKind) app. Update OpenAirDisplay there to reconnect."
                 DispatchQueue.main.async { self.peerSignal = .updateMac(message: msg) }
             }
         case WireMessage.streamConfig:
             // H.264 remains implicit for old senders. New senders announce the
-            // operating point so future codecs never have to be guessed from
-            // the first binary frame.
+            // codec before the first binary frame.
             let codec = (obj["codec"] as? String)?.lowercased() ?? "h264"
-            guard codec == "h264" else {
+            guard codec == "h264" || (codec == "hevc" && hevcCapability != nil) else {
                 Log.info("unsupported stream codec selected: \(codec)")
                 return
+            }
+            if streamCodec != codec {
+                streamCodec = codec
+                vps = nil
+                sps = nil
+                pps = nil
+                formatDesc = nil
+                displayLayer.flushAndRemoveImage()
             }
             let width = obj["width"] as? Int ?? 0
             let height = obj["height"] as? Int ?? 0
             let fps = obj["framesPerSecond"] as? Int ?? 0
-            Log.info("stream configuration: H.264 \(width)x\(height) @\(fps)fps")
+            Log.info("stream configuration: \(codec.uppercased()) \(width)x\(height) @\(fps)fps")
+        case WireMessage.power:
+            let action = (obj["action"] as? String).flatMap(PowerAction.init(rawValue:))
+            guard let action, powerActions.contains(action),
+                  let conn = connection, acceptsPowerActions(on: conn) else {
+                Log.info("ignored power \(obj["action"] ?? "?"): not offered on this session")
+                return
+            }
+            Log.info("power \(action.rawValue) requested by the sender")
+            DispatchQueue.main.async { self.onPowerAction?(action) }
         case WireMessage.updateRequired:
             // The Mac refuses this pairing until we update from the App Store.
             let message = obj["message"] as? String
@@ -942,6 +1015,8 @@ final class StreamReceiver: ObservableObject {
     private func resetStreamState() {
         buffer.removeAll(keepingCapacity: true)
         formatDesc = nil
+        streamCodec = "h264"
+        vps = nil
         sps = nil
         pps = nil
         lastFrameAt = nil
@@ -973,6 +1048,9 @@ final class StreamReceiver: ObservableObject {
             "pv": WireProtocol.version,   // issue #132 — absent on old receivers
             "displayMaxFrameRate": displayMaxFrameRate,
         ]
+        let panel = panelOverride ?? PanelAnnouncement(
+            pixelsWide: devicePixelsWide, pixelsHigh: devicePixelsHigh, scale: deviceScale)
+        hello["panel"] = panel.json
         // Additive joint capability. The legacy rectangle below stays on the
         // wire while independently updated senders remain in the field.
         var h264: [String: Any] = ["codec": "h264", "maxFrameRate": 60]
@@ -981,7 +1059,17 @@ final class StreamReceiver: ObservableObject {
             h264["maxHeight"] = maxEncodeHigh
         }
         if let maxPixelsPerSecond { h264["maxPixelsPerSecond"] = maxPixelsPerSecond }
-        hello["videoCaps"] = [h264]
+        var videoCaps = [h264]
+        if let hevc = hevcCapability {
+            var entry: [String: Any] = ["codec": "hevc"]
+            if let v = hevc.maxWidth { entry["maxWidth"] = v }
+            if let v = hevc.maxHeight { entry["maxHeight"] = v }
+            if let v = hevc.maxFrameRate { entry["maxFrameRate"] = v }
+            // The decode budget describes the device's decoder, not a codec.
+            if let v = hevc.maxPixelsPerSecond ?? maxPixelsPerSecond { entry["maxPixelsPerSecond"] = v }
+            videoCaps.append(entry)
+        }
+        hello["videoCaps"] = videoCaps
         // Additive capability: only offered while the UDP listener is bound,
         // so a sender never dials a port nobody answers on.
         let announcesCursorPort = includeCursorPort && cursorListenerReady
@@ -1001,6 +1089,7 @@ final class StreamReceiver: ObservableObject {
         // false "upgrade" onto a bridged-LAN path that still crosses the
         // phone's radio — and then have the session classified as a cable
         // whose loss must end it instead of reconnecting.
+        if acceptsPowerActions(on: conn) { hello["power"] = powerActions.map(\.rawValue) }
         let addrs = advertisesAddresses ? Self.reachableAddresses() : []
         if !addrs.isEmpty { hello["addrs"] = addrs }
         lastAdvertisedAddrs = addrs
@@ -1008,7 +1097,17 @@ final class StreamReceiver: ObservableObject {
         // still active; it must not change bookkeeping for that live session.
         if connection === conn { cursorPortAnnounced = announcesCursorPort }
         sendControl(hello, on: conn)
-        Log.info("hello sent\(announcesCursorPort ? " (cursorPort \(cursorPort))" : "")")
+        let power = hello["power"] as? [String] ?? []
+        Log.info("hello sent\(announcesCursorPort ? " (cursorPort \(cursorPort))" : "")"
+                 + (power.isEmpty ? "" : " power \(power.joined(separator: ","))"))
+    }
+
+    /// The power gate (PROTOCOL.md 6.6): the session rides the direct
+    /// cable, judged from this side of the connection. A session that falls
+    /// back to WiFi is a new connection with a fresh hello, so the offer
+    /// follows the live path.
+    private func acceptsPowerActions(on conn: NWConnection) -> Bool {
+        !powerActions.isEmpty && DirectCable.carries(conn)
     }
 
     /// Every IP address of an up, non-loopback interface, for hello.addrs.
@@ -1192,24 +1291,42 @@ final class StreamReceiver: ObservableObject {
         var vclNALUs: [Data] = []
         for nalu in nalus {
             guard let first = nalu.first else { continue }
-            switch first & 0x1F {
-            case 7:                                  // SPS (stream may change
-                if sps != nalu {                     //  size on rotation)
-                    sps = nalu
-                    formatDesc = nil
+            if streamCodec == "hevc" {
+                guard nalu.count >= 2 else { continue }
+                switch (first >> 1) & 0x3F {
+                case 32:  // VPS
+                    if vps != nalu { vps = nalu; formatDesc = nil }
+                case 33:  // SPS
+                    if sps != nalu { sps = nalu; formatDesc = nil }
+                case 34:  // PPS
+                    if pps != nalu { pps = nalu; formatDesc = nil }
+                case 0...31: vclNALUs.append(nalu)
+                default: break  // AUD, SEI, and other non-picture NALUs
                 }
-            case 8:                                  // PPS
-                if pps != nalu {
-                    pps = nalu
-                    formatDesc = nil
+            } else {
+                switch first & 0x1F {
+                case 7:                                  // SPS (stream may change
+                    if sps != nalu {                     //  size on rotation)
+                        sps = nalu
+                        formatDesc = nil
+                    }
+                case 8:                                  // PPS
+                    if pps != nalu {
+                        pps = nalu
+                        formatDesc = nil
+                    }
+                case 6: break                            // SEI — skip
+                default: vclNALUs.append(nalu)           // slice data
                 }
-            case 6: break                            // SEI — skip
-            default: vclNALUs.append(nalu)           // slice data
             }
         }
-        if formatDesc == nil, let sps, let pps {
+        if formatDesc == nil, let sps, let pps, streamCodec != "hevc" || vps != nil {
             displayLayer.flushAndRemoveImage()   // drop the previous format's last image
-            buildFormatDescription(sps: sps, pps: pps)
+            if streamCodec == "hevc", let vps {
+                buildHEVCFormatDescription(vps: vps, sps: sps, pps: pps)
+            } else if streamCodec == "h264" {
+                buildFormatDescription(sps: sps, pps: pps)
+            }
         }
         guard !vclNALUs.isEmpty else { return }
         // All slices of one wire frame go into ONE sample buffer.
@@ -1234,7 +1351,15 @@ final class StreamReceiver: ObservableObject {
                 )
                 if status == noErr, let formatDesc {
                     let dims = CMVideoFormatDescriptionGetDimensions(formatDesc)
-                    Log.info("format description built: \(dims.width)x\(dims.height)")
+                    // Colour tags come from the SPS VUI. A BT.709 transfer tag on
+                    // desktop content makes the display lift shadows (#322).
+                    func tag(_ key: CFString) -> String {
+                        (CMFormatDescriptionGetExtension(formatDesc, extensionKey: key) as? String) ?? "-"
+                    }
+                    Log.info("format description built: \(dims.width)x\(dims.height) "
+                        + "primaries=\(tag(kCMFormatDescriptionExtension_ColorPrimaries)) "
+                        + "transfer=\(tag(kCMFormatDescriptionExtension_TransferFunction)) "
+                        + "matrix=\(tag(kCMFormatDescriptionExtension_YCbCrMatrix))")
                     DispatchQueue.main.async {
                         self.videoSize = CGSize(width: Int(dims.width), height: Int(dims.height))
                     }
@@ -1243,6 +1368,38 @@ final class StreamReceiver: ObservableObject {
                     Log.info("format description FAILED: \(status)")
                 }
             }
+        }
+    }
+
+    private func buildHEVCFormatDescription(vps: Data, sps: Data, pps: Data) {
+        vps.withUnsafeBytes { vpsBuf in
+            sps.withUnsafeBytes { spsBuf in
+                pps.withUnsafeBytes { ppsBuf in
+                    let ptrs: [UnsafePointer<UInt8>] = [
+                        vpsBuf.bindMemory(to: UInt8.self).baseAddress!,
+                        spsBuf.bindMemory(to: UInt8.self).baseAddress!,
+                        ppsBuf.bindMemory(to: UInt8.self).baseAddress!,
+                    ]
+                    let sizes = [vps.count, sps.count, pps.count]
+                    let status = CMVideoFormatDescriptionCreateFromHEVCParameterSets(
+                        allocator: kCFAllocatorDefault,
+                        parameterSetCount: 3,
+                        parameterSetPointers: ptrs,
+                        parameterSetSizes: sizes,
+                        nalUnitHeaderLength: 4,
+                        extensions: nil,
+                        formatDescriptionOut: &formatDesc)
+                    if status != noErr { Log.info("HEVC format description FAILED: \(status)") }
+                }
+            }
+        }
+        if let formatDesc {
+            let dims = CMVideoFormatDescriptionGetDimensions(formatDesc)
+            Log.info("HEVC format description built: \(dims.width)x\(dims.height)")
+            DispatchQueue.main.async {
+                self.videoSize = CGSize(width: Int(dims.width), height: Int(dims.height))
+            }
+            setStatus("Receiving \(dims.width)×\(dims.height)")
         }
     }
 
@@ -1292,6 +1449,9 @@ final class StreamReceiver: ObservableObject {
             sampleBufferOut: &sample)
 
         guard let sample else { return }
+        #if DEBUG
+        idleFrameDumper?.push(sample)
+        #endif
 
         if loggedDisplayPath != (useMetalPath && onDecodedFrame != nil) {
             loggedDisplayPath = useMetalPath && onDecodedFrame != nil
@@ -1363,6 +1523,9 @@ final class StreamReceiver: ObservableObject {
             stats.rttMs = lastRttMs
             stats.e2eSamples = e2eRing
             stats.transport = transport
+            stats.codec = streamCodec == "hevc" ? "HEVC" : "H.264"
+            let medianInterval = percentile(frameIntervals, 0.5)
+            stats.hitches = frameIntervals.filter { $0 > medianInterval * 1.5 }.count
             stats.macDrops = macDrops
             stats.macEncDrops = macEncDrops
             stats.macNetDrops = macNetDrops
@@ -1403,6 +1566,13 @@ final class StreamReceiver: ObservableObject {
                     "ph50": stats.photonP50.rounded(),
                     "ph95": stats.photonP95.rounded(),
                     "offsetKnown": clockOffsetMs != nil,
+                    // Frame pacing over the last ~120 frames: a "hitch" is a gap
+                    // over 1.5x the median, i.e. at least one frame missing from
+                    // an otherwise steady cadence (what reads as stutter).
+                    "int50": percentile(frameIntervals, 0.5).rounded(),
+                    "int95": percentile(frameIntervals, 0.95).rounded(),
+                    "hitch": stats.hitches,
+                    "codec": stats.codec,
                 ])
                 e2eWindow.removeAll(keepingCapacity: true)
                 encodeWindow.removeAll(keepingCapacity: true)
@@ -1507,7 +1677,7 @@ final class StreamReceiver: ObservableObject {
                 self.macProtocolVersion = WireProtocol.assumedWhenAbsent
             }
         }
-        if !value { setStatus("Listening on :9000") }
+        if !value { setStatus("Ready to connect") }
         else {
             setStatus("Connected")
             // Remember the first ever successful connection to a Mac so the
@@ -1516,5 +1686,33 @@ final class StreamReceiver: ObservableObject {
                 UserDefaults.standard.set(true, forKey: "hasConnectedBefore")
             }
         }
+    }
+}
+
+/// `hello.panel` (PROTOCOL.md 6.7): facts about the panel in its current
+/// orientation. The sender decides the desktop from them.
+struct PanelAnnouncement: Equatable, CustomStringConvertible {
+    /// Physical pixels shown 1:1 (minus any strip never shown, like a notch).
+    let pixelsWide: Int
+    let pixelsHigh: Int
+    /// Real backing scale; may be fractional.
+    let scale: Double
+    /// The desktop size a Mac receiver currently runs; nil elsewhere.
+    var pointsWide: Int? = nil
+    var pointsHigh: Int? = nil
+
+    var json: [String: Any] {
+        var panel: [String: Any] = ["pixelsWide": pixelsWide, "pixelsHigh": pixelsHigh,
+                                    "scale": scale]
+        if let pointsWide, let pointsHigh {
+            panel["pointsWide"] = pointsWide
+            panel["pointsHigh"] = pointsHigh
+        }
+        return panel
+    }
+
+    var description: String {
+        "\(pixelsWide)x\(pixelsHigh) @\(scale)"
+            + (pointsWide.map { " points \($0)x\(pointsHigh ?? 0)" } ?? "")
     }
 }

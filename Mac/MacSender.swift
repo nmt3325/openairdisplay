@@ -24,29 +24,6 @@ enum CaptureMode: String {
     case extend   // virtual display (Milestone 2)
 }
 
-struct PhoneInfo: Decodable {
-    let pixelsWide: Int   // landscape-oriented (long edge)
-    let pixelsHigh: Int
-    let scale: Double
-    let device: String?   // "iPad" / "iPhone" (older receivers omit it)
-    let id: String?       // per-install identity (older receivers omit it) —
-                          // lets the controller match the same physical device
-                          // across USB and WiFi
-    let pv: Int?          // receiver protocol version (issue #132); absent on
-                          // every pre-handshake install → treat as protocol 1
-    let cursorPort: Int?  // UDP port for the cursor side channel (PROTOCOL.md
-                          // 6.3); absent = cursor stays on TCP
-    let addrs: [String]?  // every address the receiver is reachable on
-                          // (PROTOCOL.md 6.4); probed for a cable upgrade
-    let maxEncodeWide: Int?  // receiver's decode ceiling in pixels (PROTOCOL.md
-    let maxEncodeHigh: Int?  //  6.5): cap the stream, keep the desktop size
-    let displayMaxFrameRate: Int?       // presentation ceiling; absent = legacy 60
-    let videoCaps: [VideoCapability]?   // codec-specific joint decode constraints
-
-    var kind: String { device ?? "device" }
-    var protocolVersion: Int { pv ?? WireProtocol.assumedWhenAbsent }
-}
-
 /// How the sender reaches the receiver. Reconnects re-dial from scratch, so
 /// a USB device that was replugged (new usbmuxd DeviceID) is found again.
 enum SenderTransport {
@@ -119,20 +96,28 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // poisoned one.
     private var baseIdentityOffset: UInt32
 
-    // ── Encoder parallelism limiter (maxPendingEncodes = 1) ─────────────────
+    // ── Encoder parallelism limiter ─────────────────────────────────────────
     //
     // VTCompressionSessionEncodeFrame returns immediately; the hardware H.264
     // encoder runs asynchronously. If ScreenCaptureKit delivers the next frame
     // before the previous encode callback fires, VideoToolbox will run multiple
     // encodes in parallel inside the same session.
     //
-    // Capping pendingEncodes at 1 enforces “latest frame wins” on the encoder:
+    // Capping pendingEncodes at 1 enforces "latest frame wins" on the encoder:
     // skip captures while an encode is in flight (enc drops), then feed the next
-    // fresh buffer when the callback clears the slot. The H.264 reference chain
-    // stays valid (pre-encode skip → normal P-frame n→n+2); we do NOT force
-    // keyframes on enc drops.
+    // fresh buffer when the callback clears the slot. The reference chain stays
+    // valid (pre-encode skip → normal P-frame n→n+2); we do NOT force keyframes
+    // on enc drops. Same for both codecs: measured on an M5 Pro, a second slot
+    // buys frames only below 5K and roughly doubles p95 latency, at 5K it buys
+    // none (research/hevc-m5-2026-09-29).
     private var pendingEncodes = 0
-    private let maxPendingEncodes = 1
+    private var maxPendingEncodes: Int {
+        #if DEBUG
+        let override = UserDefaults.standard.integer(forKey: "maxPendingEncodes")
+        if override > 0 { return override }   // A/B knob: -maxPendingEncodes N
+        #endif
+        return 1
+    }
 
     // ── Outstanding send backpressure (maxPendingSends = 3) ──────────────────
     //
@@ -155,6 +140,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     private var dropsNetTotal = 0
     private var needsKeyframe = true
     private var connectionReady = false
+    // Queue-confined. A reconnect can land on a different receiver app at the
+    // same address (e.g. an H.264-only release build): until this connection's
+    // hello offers HEVC, an HEVC stream is neither announced nor sent to it.
+    private var helloSeenOnConnection = false
+    private var peerAcceptsActiveCodec: Bool {
+        guard activeStreamConfigurationSnapshot?.codec == VideoStreamConfiguration.hevcCodec
+        else { return true }
+        return helloSeenOnConnection && lastHello?.videoCaps?.contains(where: {
+            $0.codec.lowercased() == VideoStreamConfiguration.hevcCodec }) == true
+    }
     private var stopped = false
     // The liveness monitors are self-rescheduling chains guarded only by
     // `stopped`; arm them at most once per instance so a double start() can't
@@ -191,6 +186,18 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // `queue`.
     private var captureRecoveryFailures = 0
     private let maxCaptureRecoveryFailures = 5
+    // Display sleep and screen lock make every recovery attempt fail until
+    // the user is back, so rounds are deferred instead of spent on them —
+    // otherwise any sleep longer than the budget ends the session. Set while
+    // deferring so the wait logs once. On `queue`.
+    private var waitingForConsole = false
+    // The one pending recovery tick, cancelled and replaced on every arm so
+    // a stream dying while a round is in flight can't leave two chains
+    // running (both would fire on unlock and race `startCapture`, orphaning
+    // an SCStream). A tick that finds a round in flight leaves re-arming to
+    // that round. On `queue`.
+    private var captureRecoveryWork: DispatchWorkItem?
+    private var captureRecoveryInFlight = false
 
     // Consecutive actively-refused dials on a previously connected session.
     // Refusal is unambiguous: the device is reachable but nothing listens,
@@ -314,7 +321,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // Selection and pacing cross the async capture setup task, the serial SCK
     // queue and VideoToolbox callbacks. Keep both under pipelineLock so a
     // reconfiguration cannot race a frame admission or announcement.
-    private var activeStreamConfiguration: H264StreamConfiguration?
+    private var activeStreamConfiguration: VideoStreamConfiguration?
     private var frameRateLimiter = FrameRateLimiter(framesPerSecond: 60)
 
     private var framesSent = 0
@@ -329,6 +336,21 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Debounced replay after encoder/send backpressure drops a frame.
     /// At most one timer is active; each new drop resets the 30ms deadline.
     private var dropReplayTimer: DispatchSourceTimer?
+    #if DEBUG
+    /// Settle refinement (#322 step 2, Debug-only experiment): once capture has been
+    /// quiet for `refineIdleMs`, re-encode `lastPixelBuffer` for
+    /// `refineFrames` frames at `refineBoost` x the base bitrate. One timer,
+    /// cancelled and replaced by every changed capture frame.
+    private let refineFrames = UserDefaults.standard.integer(forKey: "refineFrames")
+    private let refineBoost = UserDefaults.standard.object(forKey: "refineBoost") == nil
+        ? 4.0 : UserDefaults.standard.double(forKey: "refineBoost")
+    private let refineIdleMs = UserDefaults.standard.object(forKey: "refineIdleMs") == nil
+        ? 150 : UserDefaults.standard.integer(forKey: "refineIdleMs")
+    private var refineTimer: DispatchSourceTimer?
+    private var refineRemaining = 0
+    #endif
+    /// Bitrate the encoder was configured with; refinement restores it.
+    private var baseBitrate = 0
 
     init(transport: SenderTransport, name: String, mode: CaptureMode,
          quality: StreamQuality = .best, displaySerial: UInt32 = 0x0001,
@@ -400,6 +422,15 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
             let info = try await waitForHello()
             try await setupExtend(info)
+            // A hello during setup (a rotation inside the identity retry or
+            // promotion window) found no stream to reconfigure; apply it now.
+            // Same for a canvas rebuild requested before any stream existed
+            // (a 2x refusal or an HEVC failure during setup).
+            if let latest = lastHello,
+               streamSelectionInputsChanged(from: info, to: latest) || canvasNeedsRebuild {
+                canvasNeedsRebuild = false
+                await reconfigure(latest)
+            }
 
             // Touch back-channel (Milestone 3). Needs Accessibility trust;
             // streaming works without it, so don't interrupt with a prompt —
@@ -420,14 +451,221 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Build (or rebuild) the virtual display + capture for the announced
     /// phone dimensions. Called at startup and again whenever the phone
     /// rotates (it re-sends hello with swapped dimensions).
-    private func setupExtend(_ info: PhoneInfo) async throws {
-        Log.info("phone hello: \(info.pixelsWide)x\(info.pixelsHigh) @\(info.scale)x")
+    /// The desktop the sender decides for this receiver (`DesktopPolicy`).
+    private func desktopPlan(for info: PhoneInfo) -> DesktopPlan {
+        var plan = DesktopPolicy.plan(facts: info.facts, choice: displaySize(for: info))
+        #if DEBUG
+        // `-forceDesktopPoints 374x666` asks for a 2x desktop macOS refuses,
+        // to exercise the 1x fallback (#292).
+        if let forced = UserDefaults.standard.string(forKey: "forceDesktopPoints")?
+            .split(separator: "x").compactMap({ Int($0) }), forced.count == 2 {
+            plan = DesktopPlan(desktop: VirtualCanvasSize(pointsWide: forced[0], pointsHigh: forced[1]),
+                               explicit: true, presentable: plan.presentable)
+        }
+        #endif
+        if isRefused(plan.desktop) {
+            plan = DesktopPolicy.oneXFallback(facts: info.facts)
+        }
+        return plan
+    }
 
-        // The virtual display runs @2x HiDPI. Large modes are applied only
-        // after a conservative bootstrap mode is online; some saved macOS
-        // display states reject the same mode when it is present at creation.
+    /// The virtual display for the receiver: the plan's desktop, a default
+    /// one capped at the stream size so capture is 1:1 (`DesktopPolicy.canvas`).
+    /// Debug builds: `-canvasAtStreamSize NO` keeps the uncapped desktop for A/B tests.
+    private func desktopCanvas(for info: PhoneInfo) -> VirtualCanvasSize {
+        let plan = desktopPlan(for: info)
+        #if DEBUG
+        let defaults = UserDefaults.standard
+        if defaults.object(forKey: "canvasAtStreamSize") != nil,
+           !defaults.bool(forKey: "canvasAtStreamSize") { return plan.desktop }
+        #endif
+        let canvas = DesktopPolicy.canvas(
+            for: plan,
+            codec: preferredCodec(for: info, source: plan.desktopPixels),
+            legacyCeiling: legacyEncodeCeiling(for: info),
+            videoCaps: info.videoCaps,
+            displayMaxFrameRate: info.displayMaxFrameRate)
+        if isRefused(canvas) {
+            return DesktopPolicy.oneXFallback(facts: info.facts).desktop
+        }
+        if canvas != plan.desktop {
+            Log.info("canvas capped at the stream size: \(canvas.pointsWide)x\(canvas.pointsHigh)pt "
+                + "@\(canvas.scale)x for a \(plan.desktop.pointsWide)x\(plan.desktop.pointsHigh)pt desktop")
+        }
+        return canvas
+    }
+
+    /// The user's per-device desktop size (the Display size control),
+    /// read on every hello so a reconnect, a transport switch and a rotation
+    /// all apply it.
+    private func displaySize(for info: PhoneInfo) -> DisplaySize {
+        DisplaySizeStore.load(key: displaySizeKey(for: info))
+    }
+
+    func displaySizeKey(for info: PhoneInfo) -> String {
+        DisplaySizeStore.key(installID: info.id, serial: displaySerial)
+    }
+
+    /// Store a new choice and resize this session's display in place.
+    func setDisplaySize(_ size: DisplaySize, for info: PhoneInfo) {
+        let key = displaySizeKey(for: info)
+        guard DisplaySizeStore.load(key: key) != size else { return }
+        DisplaySizeStore.save(size, key: key)
+        Log.info("display size set to \(size.rawValue) for \(key)")
+        guard mode == .extend else { return }
+        scheduleCanvasRebuild()
+    }
+
+    /// What every choice gives this receiver now (Best quality, so the
+    /// caption describes the size, not the quality setting). Empty when
+    /// mirroring: the desktop is this Mac's own display there.
+    func displaySizeOutcomes(for info: PhoneInfo) -> [DisplaySizeOutcome] {
+        guard mode == .extend else { return [] }
+        return DisplaySize.allCases.map { choice in
+            var plan = DesktopPolicy.plan(facts: info.facts, choice: choice)
+            if isRefused(plan.desktop) {
+                plan = DesktopPolicy.oneXFallback(facts: info.facts)
+            }
+            return DesktopPolicy.outcome(
+                of: plan, choice: choice,
+                codec: preferredCodec(for: info, source: plan.desktopPixels),
+                legacyCeiling: legacyEncodeCeiling(for: info),
+                videoCaps: info.videoCaps,
+                displayMaxFrameRate: info.displayMaxFrameRate)
+        }
+    }
+
+    /// 2x desktops macOS refused on this session's display (#292); the
+    /// desktop policy runs the 1x fallback instead of any of them.
+    /// Written from the display's enforcement loop, read from capture and
+    /// control paths, so it lives under `pipelineLock`.
+    private var refusedDesktopsStorage: Set<VirtualCanvasSize> = []
+
+    private func isRefused(_ desktop: VirtualCanvasSize) -> Bool {
+        pipelineLock.lock(); defer { pipelineLock.unlock() }
+        return refusedDesktopsStorage.contains(desktop)
+    }
+
+    /// Runs on `queue`, where `lastHello` lives.
+    private func modeRefused(_ refused: VirtualCanvasSize, info: PhoneInfo) {
+        pipelineLock.lock()
+        let inserted = refusedDesktopsStorage.insert(refused).inserted
+        pipelineLock.unlock()
+        guard inserted else { return }
+        let fallback = DesktopPolicy.oneXFallback(facts: info.facts).desktop
+        Log.info("macOS refused \(refused.pointsWide)x\(refused.pointsHigh) @2x, running "
+            + "\(fallback.pointsWide)x\(fallback.pointsHigh) @1x")
+        scheduleCanvasRebuild()
+    }
+
+    /// Log once per session that a receiver's `panel` failed validation.
+    private var loggedInvalidPanel = false
+
+    /// HEVC when the receiver offers it and this Mac can encode that stream
+    /// in hardware (see `VideoStreamConfiguration.preferredCodec`). The encoder
+    /// is probed at the real stream size before the canvas is sized, so a Mac
+    /// that cannot encode it gets an H.264-sized desktop from the start. A
+    /// failed HEVC encoder later switches this session to H.264.
+    private func preferredCodec(for info: PhoneInfo, source: PixelSize) -> String {
+        let codec = VideoStreamConfiguration.preferredCodec(
+            receiverCapabilities: info.videoCaps,
+            senderEncodesHEVC: Self.hardwareHEVCEncoder && !hevcEncoderFailed)
+        guard codec == VideoStreamConfiguration.hevcCodec else { return codec }
+        guard let best = try? VideoStreamConfiguration.make(
+            source: source, quality: .best, codec: codec,
+            receiverCapabilities: info.videoCaps,
+            displayMaxFrameRate: info.displayMaxFrameRate,
+            presentable: info.facts.pixels) else { return codec }
+        if Self.canEncodeHEVC(best.encodedSize) { return codec }
+        return VideoStreamConfiguration.h264Codec
+    }
+
+    /// Apple silicon only for now: Intel senders' HEVC encode speed is
+    /// unmeasured, and H.264 is the known-good path there.
+    private static let hardwareHEVCEncoder: Bool = {
+        #if arch(arm64)
+        let available = canEncodeHEVC(PixelSize(width: 1920, height: 1080))
+        Log.info("hardware HEVC encoder: \(available ? "available" : "unavailable")")
+        return available
+        #else
+        return false
+        #endif
+    }()
+    private var hevcEncoderFailed: Bool {
+        get { pipelineLock.lock(); defer { pipelineLock.unlock() }; return hevcEncoderFailedStorage }
+        set { pipelineLock.lock(); hevcEncoderFailedStorage = newValue; pipelineLock.unlock() }
+    }
+    private var hevcEncoderFailedStorage = false
+    private var consecutiveEncodeFailures = 0   // guarded by pipelineLock
+
+    /// A session can be created and then reject every frame, which leaves the
+    /// receiver black. For HEVC that is recoverable: after a run of failures
+    /// with no success, switch this sender to H.264 and rebuild the stream
+    /// (canvas included) from the latest hello.
+    private func noteEncodeResult(succeeded: Bool) {
+        pipelineLock.lock()
+        consecutiveEncodeFailures = succeeded ? 0 : consecutiveEncodeFailures + 1
+        let giveUp = !succeeded && consecutiveEncodeFailures == 30
+            && activeStreamConfiguration?.codec == VideoStreamConfiguration.hevcCodec
+            && !hevcEncoderFailedStorage
+        if giveUp { hevcEncoderFailedStorage = true }
+        pipelineLock.unlock()
+        guard giveUp else { return }
+        Log.info("HEVC encoder failed 30 frames in a row; switching to H.264")
+        queue.async { [weak self] in
+            guard let self, let info = self.lastHello else { return }
+            Task { await self.reconfigure(info) }
+        }
+    }
+    private static let hevcProbeLock = NSLock()
+    private static var hevcProbeResults: [String: Bool] = [:]
+
+    /// Throwaway hardware HEVC session at this size, cached per size.
+    private static func canEncodeHEVC(_ size: PixelSize) -> Bool {
+        #if DEBUG
+        if UserDefaults.standard.bool(forKey: "failHEVCEncoder") { return false }
+        #endif
+        let key = "\(size.width)x\(size.height)"
+        hevcProbeLock.lock()
+        defer { hevcProbeLock.unlock() }
+        if let known = hevcProbeResults[key] { return known }
+        var session: VTCompressionSession?
+        let spec = [kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder: kCFBooleanTrue] as CFDictionary
+        let status = VTCompressionSessionCreate(
+            allocator: nil, width: Int32(size.width), height: Int32(size.height),
+            codecType: kCMVideoCodecType_HEVC, encoderSpecification: spec,
+            imageBufferAttributes: nil, compressedDataAllocator: nil,
+            outputCallback: nil, refcon: nil, compressionSessionOut: &session)
+        if let session { VTCompressionSessionInvalidate(session) }
+        let ok = status == noErr && session != nil
+        hevcProbeResults[key] = ok
+        // Logged once per size, however often the Display size captions ask.
+        if !ok { Log.info("HEVC encoder unavailable at \(key); using H.264") }
+        return ok
+    }
+
+    private func legacyEncodeCeiling(for info: PhoneInfo) -> PixelSize? {
+        guard let maxW = info.maxEncodeWide, let maxH = info.maxEncodeHigh,
+              maxW > 0, maxH > 0 else { return nil }
+        return PixelSize(width: maxW, height: maxH)
+    }
+
+    private func setupExtend(_ info: PhoneInfo) async throws {
+        let facts = info.facts
+        Log.info("phone hello: " + (info.panel?.facts != nil
+            ? "panel \(facts.pixelsWide)x\(facts.pixelsHigh) @\(facts.scale)"
+                + (facts.pointsWide.map { " points \($0)x\(facts.pointsHigh ?? 0)" } ?? "")
+            : "legacy \(info.pixelsWide)x\(info.pixelsHigh) @\(info.scale)x"))
+        noteInvalidPanel(info)
+
+        // The desktop comes from `DesktopPolicy` (2x HiDPI for Retina-like
+        // panels, 1x otherwise). Large modes are applied only after a
+        // conservative bootstrap mode is online; some saved macOS display
+        // states reject the same mode when it is present at creation.
+        let canvas = desktopCanvas(for: info)
         guard let canvasPlan = VirtualCanvasSizing.plan(
-            pixelsWide: info.pixelsWide, pixelsHigh: info.pixelsHigh) else {
+            pixelsWide: canvas.pixelsWide, pixelsHigh: canvas.pixelsHigh,
+            scale: canvas.scale) else {
             throw NSError(domain: "MacSender", code: 7,
                           userInfo: [NSLocalizedDescriptionKey: "the receiver reported an invalid display size"])
         }
@@ -436,7 +674,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let pointsWide = bootstrapCanvas.pointsWide
         let pointsHigh = bootstrapCanvas.pointsHigh
         // Rough physical size so macOS picks a sane default UI scale.
-        let mm = info.pixelsWide >= info.pixelsHigh
+        let mm = canvas.pointsWide >= canvas.pointsHigh
             ? CGSize(width: 147, height: 68)
             : CGSize(width: 68, height: 147)
 
@@ -502,6 +740,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     // either keying.
                     return VirtualDisplay(name: displayName,
                                           pointsWide: pointsWide, pointsHigh: pointsHigh,
+                                          scale: bootstrapCanvas.scale,
                                           descriptorMaxPixelsPerAxis: canvasPlan.descriptorMaxPixelsPerAxis,
                                           sizeInMillimeters: mm,
                                           serialNum: serial &+ totalOffset,
@@ -513,7 +752,17 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                                           })
                 }
                 if stopped { throw CancellationError() }
-                if created != nil { break }
+                if let created {
+                    await MainActor.run {
+                        created.onModeRefused = { [weak self] refused in
+                            self?.queue.async {
+                                guard let self, let info = self.lastHello else { return }
+                                self.modeRefused(refused, info: info)
+                            }
+                        }
+                    }
+                    break
+                }
                 Log.info("virtual display creation failed (identity +\(totalOffset), attempt \(attempt + 1)) — retrying")
                 await status("Preparing virtual display…")
             }
@@ -600,8 +849,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         try ensureActiveDisplay(vd)
         inputInjector = InputInjector(displayID: vd.displayID)
         try await startCapture(display: captureDisplay,
-                               sourcePixelsWide: vd.pointsWide * 2,
-                               sourcePixelsHigh: vd.pointsHigh * 2,
+                               sourcePixelsWide: vd.pixelsWide,
+                               sourcePixelsHigh: vd.pixelsHigh,
                                receiver: info)
         try ensureActiveDisplay(vd)
 
@@ -624,7 +873,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         defer { reconfiguring = false }
         var target = info
         while !stopped {
-            Log.info("reconfiguring stream for \(target.pixelsWide)x\(target.pixelsHigh)")
+            let facts = target.facts
+            Log.info("reconfiguring stream for a \(facts.pixelsWide)x\(facts.pixelsHigh) panel")
             // A cached frame is valid for a network reconnect to the same
             // display, but never for a rotation: it belongs to the retired
             // desktop and can otherwise be replayed onto the new one.
@@ -666,11 +916,29 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 return
             }
             if let latest = lastHello,
-               streamSelectionInputsChanged(from: target, to: latest) {
+               streamSelectionInputsChanged(from: target, to: latest) || canvasNeedsRebuild {
+                canvasNeedsRebuild = false
                 target = latest
                 continue
             }
             return
+        }
+    }
+
+    /// Set when the HEVC encoder failed after the canvas was sized for HEVC:
+    /// the next reconfigure resizes it for H.264 so capture is 1:1 again.
+    private var canvasNeedsRebuild = false
+    private func scheduleCanvasRebuild() {
+        canvasNeedsRebuild = true
+        Task {
+            try? await Task.sleep(for: .milliseconds(300))
+            guard let info = self.lastHello, self.canvasNeedsRebuild else { return }
+            // Still in setup: `start()` picks the flag up once setupExtend
+            // returns, so a second capture path never starts beside it.
+            guard self.stream != nil else { return }
+            // A running reconfigure picks the flag up at the end of its pass.
+            if !self.reconfiguring { self.canvasNeedsRebuild = false }
+            await self.reconfigure(info)
         }
     }
 
@@ -680,30 +948,38 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             || old.maxEncodeHigh != new.maxEncodeHigh
             || old.displayMaxFrameRate != new.displayMaxFrameRate
             || old.videoCaps != new.videoCaps
+            || old.facts.pixels != new.facts.pixels
+        // The derived desktop, not the raw fields: a hello that changes
+        // nothing the policy reads keeps the display as it is.
         let desktopChanged = mode == .extend
-            && (old.pixelsWide != new.pixelsWide || old.pixelsHigh != new.pixelsHigh)
+            && desktopPlan(for: old) != desktopPlan(for: new)
         return receiverConstraintsChanged || desktopChanged
     }
 
     /// Apply a rotated mode when needed and restart the capture/encoder pieces.
-    /// A capability-only update leaves the virtual display mode untouched.
+    /// The canvas follows the panel and the stream cap (`canvasPixels`), so a
+    /// capability update that changes the cap also resizes the desktop.
     /// Returns false only when there is no reusable display or its previous
     /// canvas cannot be recovered, letting the caller rebuild as a last resort.
     private func resizeExistingDisplay(for info: PhoneInfo) async throws -> Bool {
         guard let vd = virtualDisplay else { return false }
         try ensureActiveDisplay(vd)
 
-        let pointsWide = (info.pixelsWide / 2) & ~1
-        let pointsHigh = (info.pixelsHigh / 2) & ~1
+        let canvas = desktopCanvas(for: info)
+        let scale = canvas.scale
+        let pointsWide = canvas.pointsWide
+        let pointsHigh = canvas.pointsHigh
         let arrangementKey = info.id ?? String(format: "serial-%08x", displaySerial)
         let size = CGSize(width: pointsWide, height: pointsHigh)
         let previous = VirtualCanvasSize(pointsWide: vd.pointsWide,
-                                         pointsHigh: vd.pointsHigh)
+                                         pointsHigh: vd.pointsHigh,
+                                         scale: vd.scale)
         let dimensionsChanged = vd.pointsWide != pointsWide || vd.pointsHigh != pointsHigh
+            || vd.scale != scale
         let didResize = if dimensionsChanged {
             await MainActor.run {
                 guard !self.stopped, self.virtualDisplay === vd else { return false }
-                return vd.resize(pointsWide: pointsWide, pointsHigh: pointsHigh,
+                return vd.resize(pointsWide: pointsWide, pointsHigh: pointsHigh, scale: scale,
                                  movingTo: DisplayArrangement.origin(for: size,
                                                                      device: arrangementKey))
             }
@@ -712,7 +988,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         try ensureActiveDisplay(vd)
         guard didResize else {
-            Log.info("virtual display mode \(info.pixelsWide)x\(info.pixelsHigh) was rejected — "
+            Log.info("virtual display mode \(canvas.pixelsWide)x\(canvas.pixelsHigh) was rejected — "
                 + "resuming the existing \(previous.pixelsWide)x\(previous.pixelsHigh) desktop canvas")
             return try await resumeExistingCanvas(vd, canvas: previous,
                                                   receiver: info)
@@ -728,12 +1004,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             let nsError = error as NSError
             guard dimensionsChanged,
                   !(nsError.domain == "MacSender" && nsError.code == 4) else { throw error }
-            Log.info("virtual display mode \(info.pixelsWide)x\(info.pixelsHigh) did not come online "
+            Log.info("virtual display mode \(canvas.pixelsWide)x\(canvas.pixelsHigh) did not come online "
                 + "(\(error)) — rolling back to \(previous.pixelsWide)x\(previous.pixelsHigh)")
             let rolledBack = await MainActor.run {
                 guard !self.stopped, self.virtualDisplay === vd else { return false }
                 return vd.resize(pointsWide: previous.pointsWide,
                                  pointsHigh: previous.pointsHigh,
+                                 scale: previous.scale,
                                  movingTo: DisplayArrangement.origin(for: previous.cgSize,
                                                                      device: arrangementKey))
             }
@@ -744,8 +1021,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         }
         try ensureActiveDisplay(vd)
         try await startCapture(display: display,
-                               sourcePixelsWide: pointsWide * 2,
-                               sourcePixelsHigh: pointsHigh * 2,
+                               sourcePixelsWide: pointsWide * scale,
+                               sourcePixelsHigh: pointsHigh * scale,
                                receiver: info)
         try ensureActiveDisplay(vd)
         if dimensionsChanged {
@@ -762,6 +1039,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// Resume capture on the last known-good mode without replacing the
     /// virtual monitor. Returning false tells the caller that this identity
     /// really is unavailable and a rebuild is the remaining recovery path.
+    private func noteInvalidPanel(_ info: PhoneInfo) {
+        guard info.hasInvalidPanel, !loggedInvalidPanel else { return }
+        loggedInvalidPanel = true
+        Log.info("receiver sent an invalid hello.panel (\(String(describing: info.panel))); "
+            + "using the legacy \(info.pixelsWide)x\(info.pixelsHigh) fields")
+    }
+
     private func resumeExistingCanvas(_ vd: VirtualDisplay, canvas: VirtualCanvasSize,
                                       receiver info: PhoneInfo) async throws -> Bool {
         do {
@@ -830,23 +1114,38 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                               receiver info: PhoneInfo) async throws {
         try Task.checkCancellation()
         guard !stopped else { throw CancellationError() }
-        let legacyCeiling: PixelSize?
-        if let maxW = info.maxEncodeWide, let maxH = info.maxEncodeHigh,
-           maxW > 0, maxH > 0 {
-            legacyCeiling = PixelSize(width: maxW, height: maxH)
-        } else {
-            legacyCeiling = nil
+        let legacyCeiling = legacyEncodeCeiling(for: info)
+        let source = PixelSize(width: sourcePixelsWide, height: sourcePixelsHigh)
+        // Every stream is bounded by the receiver's physical panel. Extend
+        // captures our own virtual display, whose canvas may be capped below
+        // the desktop; presets keep scaling from the desktop as the receiver
+        // presents it (#322).
+        let presentable = info.facts.pixels
+        func select(_ codec: String) throws -> VideoStreamConfiguration {
+            mode == .extend
+                ? try VideoStreamConfiguration.makeForCanvas(
+                    source,
+                    panel: desktopPlan(for: info).streamReference,
+                    quality: quality,
+                    codec: codec,
+                    legacyCeiling: legacyCeiling,
+                    receiverCapabilities: info.videoCaps,
+                    displayMaxFrameRate: info.displayMaxFrameRate,
+                    presentable: presentable)
+                : try VideoStreamConfiguration.make(
+                    source: source,
+                    quality: quality,
+                    codec: codec,
+                    legacyCeiling: legacyCeiling,
+                    receiverCapabilities: info.videoCaps,
+                    displayMaxFrameRate: info.displayMaxFrameRate,
+                    presentable: presentable)
         }
-        let selected = try H264StreamConfiguration.make(
-            source: PixelSize(width: sourcePixelsWide, height: sourcePixelsHigh),
-            quality: quality,
-            legacyCeiling: legacyCeiling,
-            receiverCapabilities: info.videoCaps,
-            displayMaxFrameRate: info.displayMaxFrameRate)
-        let pixelsWide = selected.encodedSize.width
-        let pixelsHigh = selected.encodedSize.height
+        var selected = try select(preferredCodec(for: info, source: source))
+        var pixelsWide = selected.encodedSize.width
+        var pixelsHigh = selected.encodedSize.height
         let sourceDescription = "\(sourcePixelsWide)x\(sourcePixelsHigh)"
-        Log.info("stream selected: H.264 \(pixelsWide)x\(pixelsHigh) @\(selected.framesPerSecond)fps from \(sourceDescription) quality=\(quality.rawValue)")
+        Log.info("stream selected: \(selected.codec.uppercased()) \(pixelsWide)x\(pixelsHigh) @\(selected.framesPerSecond)fps from \(sourceDescription) quality=\(quality.rawValue)")
 
         let filter = SCContentFilter(display: display, excludingWindows: [])
 
@@ -871,13 +1170,29 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         guard !stopped else { throw CancellationError() }
         invalidateCapturePipeline(discardingLastFrame: true)
         let generation = captureGenerationNow
-        try setupEncoder(selected)
-        setActiveStreamConfiguration(selected)
+        do {
+            try setupEncoder(selected)
+        } catch where selected.codec == VideoStreamConfiguration.hevcCodec {
+            // Never strand a session on HEVC: fall back to H.264 now, and
+            // resize the canvas for H.264 (scheduleCanvasRebuild).
+            Log.info("HEVC encoder failed (\(error.localizedDescription)); falling back to H.264")
+            hevcEncoderFailed = true
+            if mode == .extend { scheduleCanvasRebuild() }
+            selected = try select(VideoStreamConfiguration.h264Codec)
+            pixelsWide = selected.encodedSize.width
+            pixelsHigh = selected.encodedSize.height
+            config.width = pixelsWide
+            config.height = pixelsHigh
+            Log.info("stream selected: H264 \(pixelsWide)x\(pixelsHigh) @\(selected.framesPerSecond)fps from \(sourceDescription) quality=\(quality.rawValue)")
+            try setupEncoder(selected)
+        }
+        let chosen = selected
+        setActiveStreamConfiguration(chosen)
         // `queue` is also the SCK sample queue. Enqueue the selection before
         // capture starts so a new receiver sees it before the first video frame.
         queue.async { [weak self] in
-            guard self?.activeStreamConfigurationSnapshot == selected else { return }
-            self?.sendStreamConfiguration(selected)
+            guard self?.activeStreamConfigurationSnapshot == chosen else { return }
+            self?.sendStreamConfiguration(chosen)
         }
 
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
@@ -910,7 +1225,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // this, a pending recovery timer that finds the stream alive exits
         // without ever resetting the counter, and the next unrelated death
         // starts with as little as one round left.
-        queue.async { self.captureRecoveryFailures = 0 }
+        queue.async {
+            self.captureRecoveryFailures = 0
+            self.waitingForConsole = false
+        }
         Log.info("capture started: \(pixelsWide)x\(pixelsHigh) display \(display.displayID) generation \(generation) mode \(mode.rawValue) localCursor=\(localCursor)")
         let kind = lastHello?.kind ?? "device"
         await status("\(mode == .extend ? "Extending to" : "Mirroring to") \(kind) (\(pixelsWide)×\(pixelsHigh))")
@@ -932,11 +1250,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         queue.async { [weak self] in
             self?.closeCursorChannel()
             self?.stopUpgradeProbing()
+            self?.captureRecoveryWork?.cancel()
+            self?.captureRecoveryWork = nil
         }
         if let encoder { VTCompressionSessionInvalidate(encoder) }
         encoder = nil
         virtualDisplay = nil   // releasing it removes the display
         cancelDropReplayTimer()
+        #if DEBUG
+        queue.async { [weak self] in self?.cancelSettleRefinement() }
+        #endif
         queue.async { [weak self] in
             // Unblock a start() that is still waiting for the hello.
             self?.helloContinuation?.resume(throwing: CancellationError())
@@ -1021,24 +1344,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         let wired = !path.usesInterfaceType(.wifi) && !path.usesInterfaceType(.loopback)
             && !path.usesInterfaceType(.cellular)
         currentPathDirectLink = wired
-            && Self.endpointIsLinkLocal(path.remoteEndpoint ?? conn.endpoint)
-    }
-
-    /// True when the far end of a connection is a link-local address
-    /// (fe80::/10 or 169.254/16). The USB-C/Thunderbolt host-to-host link
-    /// hands out nothing else — necessary for "riding the direct cable",
-    /// but not sufficient: see refreshDirectLinkClassification.
-    private static func endpointIsLinkLocal(_ endpoint: NWEndpoint?) -> Bool {
-        guard case .hostPort(let host, _)? = endpoint else { return false }
-        switch host {
-        case .ipv4(let addr): return addr.isLinkLocal
-        case .ipv6(let addr): return addr.isLinkLocal
-        case .name(let name, _):
-            // Literal probe targets dial as names ("fe80::1%en5").
-            let bare = name.lowercased()
-            return bare.hasPrefix("169.254.") || bare.hasPrefix("fe80:")
-        @unknown default: return false
-        }
+            && DirectCable.isLinkLocal(path.remoteEndpoint ?? conn.endpoint)
     }
 
     /// A dial was actively refused (must be called on `queue`). On a session
@@ -1063,17 +1369,6 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             guard let self, !self.stopped, self.everConnected,
                   !self.connectionReady else { return }
             self.reportGone("service withdrawn and connection down — receiver app is gone, ending session")
-        }
-    }
-
-    /// Drop the current connection and dial again — fresh TCP through the
-    /// tunnel, fresh accept on the phone. Bound to the UI Reconnect button.
-    func forceReconnect() {
-        queue.async { [weak self] in
-            guard let self, !self.stopped else { return }
-            Log.info("manual reconnect requested")
-            self.disconnectedSince = Date()   // fresh grace window
-            self.scheduleReconnect()
         }
     }
 
@@ -1109,41 +1404,64 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     /// the infinite rebuild loop. Only do a full `reconfigure` when the display
     /// is actually gone (e.g. display sleep tore it down).
     private func scheduleCaptureRecovery() {
-        queue.asyncAfter(deadline: .now() + 3.0) { [weak self] in
-            guard let self, !self.stopped, self.stream == nil,
-                  let hello = self.lastHello else { return }
-            // Does our virtual display still exist? CGDisplayBounds returns a
-            // zero rect for an unknown id, so a non-empty bounds means it's live.
-            // Test isEmpty, not isNull: isNull is only true for the special
-            // CGRect.null, so it reads as "live" for a dead display too and the
-            // rebuild fallback below would become unreachable.
-            if let vd = self.virtualDisplay,
-               !CGDisplayBounds(vd.displayID).isEmpty {
-                Log.info("capture died — display still present, re-attaching capture only (#29)")
-                Task {
-                    do {
-                        let display = try await self.findSCDisplay(id: vd.displayID)
-                        // Capture at the display's pixel resolution (points ×2 @2x),
-                        // not SCDisplay.width (logical points) — matches setupExtend.
-                        try await self.startCapture(display: display,
-                                                    sourcePixelsWide: vd.pointsWide * 2,
-                                                    sourcePixelsHigh: vd.pointsHigh * 2,
-                                                    receiver: hello)
-                        self.needsKeyframe = true
-                    } catch {
-                        Log.info("re-attach failed (\(error)) — falling back to full rebuild")
-                        await self.reconfigure(hello)
-                    }
-                    self.queue.async { self.recoveryRoundEnded() }
-                }
-                return
+        queue.async { [weak self] in
+            guard let self, !self.stopped else { return }
+            self.captureRecoveryWork?.cancel()
+            let work = DispatchWorkItem { [weak self] in self?.runCaptureRecoveryRound() }
+            self.captureRecoveryWork = work
+            self.queue.asyncAfter(deadline: .now() + 3.0, execute: work)
+        }
+    }
+
+    /// On `queue`: one recovery tick armed by `scheduleCaptureRecovery`.
+    private func runCaptureRecoveryRound() {
+        captureRecoveryWork = nil
+        guard !stopped, !captureRecoveryInFlight, stream == nil,
+              let hello = lastHello else { return }
+        guard consoleCanCapture else {
+            if !waitingForConsole {
+                waitingForConsole = true
+                Log.info("capture down while the display sleeps or the screen is locked — waiting for the user before retrying")
             }
-            // Display genuinely gone — full rebuild (preserves old behavior).
-            Log.info("capture died — rebuilding pipeline")
+            scheduleCaptureRecovery()
+            return
+        }
+        if waitingForConsole {
+            waitingForConsole = false
+            Log.info("console is back — resuming capture recovery")
+        }
+        captureRecoveryInFlight = true
+        // Does our virtual display still exist? CGDisplayBounds returns a
+        // zero rect for an unknown id, so a non-empty bounds means it's live.
+        // Test isEmpty, not isNull: isNull is only true for the special
+        // CGRect.null, so it reads as "live" for a dead display too and the
+        // rebuild fallback below would become unreachable.
+        if let vd = self.virtualDisplay,
+           !CGDisplayBounds(vd.displayID).isEmpty {
+            Log.info("capture died — display still present, re-attaching capture only (#29)")
             Task {
-                await self.reconfigure(hello)
+                do {
+                    let display = try await self.findSCDisplay(id: vd.displayID)
+                    // Capture at the display's pixel resolution (points × its
+                    // scale), not SCDisplay.width (logical points) — matches setupExtend.
+                    try await self.startCapture(display: display,
+                                                sourcePixelsWide: vd.pixelsWide,
+                                                sourcePixelsHigh: vd.pixelsHigh,
+                                                receiver: hello)
+                    self.needsKeyframe = true
+                } catch {
+                    Log.info("re-attach failed (\(error)) — falling back to full rebuild")
+                    await self.reconfigure(hello)
+                }
                 self.queue.async { self.recoveryRoundEnded() }
             }
+            return
+        }
+        // Display genuinely gone — full rebuild (preserves old behavior).
+        Log.info("capture died — rebuilding pipeline")
+        Task {
+            await self.reconfigure(hello)
+            self.queue.async { self.recoveryRoundEnded() }
         }
     }
 
@@ -1160,12 +1478,21 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         return onConsole && !locked
     }
 
+    /// Whether a recovery attempt can succeed right now. SCK finds no
+    /// capturable displays while the main display sleeps or the screen is
+    /// locked (display sleep drops capture seconds before the lock engages),
+    /// so attempts then are doomed and must not count against the budget.
+    private var consoleCanCapture: Bool {
+        consoleIsInteractive && CGDisplayIsAsleep(CGMainDisplayID()) == 0
+    }
+
     /// On `queue`: after a recovery round, re-arm the loop while capture is
     /// still down — up to the cap, then declare the session gone. A capture
     /// dead this many rounds is not coming back by itself, and ending the
     /// session (display torn down, reconnect is the user's call) beats
     /// hammering WindowServer with create/destroy cycles forever.
     private func recoveryRoundEnded() {
+        captureRecoveryInFlight = false
         guard stream == nil else {
             captureRecoveryFailures = 0
             return
@@ -1182,7 +1509,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
     // MARK: - Connection (with retry)
 
     // Guards against a stale async USB dial adopting after a newer one (or a
-    // manual reconnect) superseded it. Only touched on `queue`.
+    // migration) superseded it. Only touched on `queue`.
     private var dialGeneration = 0
     // Encoded output is asynchronous. Tag it with the connection that was
     // active at submission so an old WiFi frame cannot become the first video
@@ -1221,7 +1548,8 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // Announce an already-running stream before enabling frame sends on
         // this socket. VideoToolbox callbacks run independently of `queue`, so
         // setting connectionReady first would allow the reconnect IDR to win.
-        if let selected = activeStreamConfigurationSnapshot {
+        helloSeenOnConnection = false
+        if let selected = activeStreamConfigurationSnapshot, peerAcceptsActiveCodec {
             sendStreamConfiguration(selected, on: conn)
         }
         connectionReady = true
@@ -1994,6 +2322,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             if let info = try? JSONDecoder().decode(PhoneInfo.self, from: payload) {
                 let previous = lastHello
                 lastHello = info
+                helloSeenOnConnection = true
                 // A fresh dial classifies before the hello names the device —
                 // now that it has, decide again (see the comment on the func).
                 if let conn = connection { refreshDirectLinkClassification(for: conn) }
@@ -2021,7 +2350,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 // message types. Sending on every hello is idempotent — the
                 // phone dedupes by content.
                 sendWelcome()
-                if let selected = activeStreamConfigurationSnapshot {
+                if let selected = activeStreamConfigurationSnapshot, peerAcceptsActiveCodec {
                     sendStreamConfiguration(selected)
                 }
                 if info.protocolVersion < WireProtocol.minSupportedPeer {
@@ -2136,15 +2465,21 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// Create the compression session into `encoder`, optionally requiring an
     /// encoder that supports low-latency rate control.
-    private func createCompressionSession(width: Int, height: Int, lowLatency: Bool) -> OSStatus {
-        let spec: CFDictionary? = lowLatency
-            ? [kVTVideoEncoderSpecification_EnableLowLatencyRateControl: kCFBooleanTrue] as CFDictionary
-            : nil
+    private func createCompressionSession(width: Int, height: Int,
+                                          codec: String, lowLatency: Bool) -> OSStatus {
+        var spec: [CFString: Any] = [:]
+        if lowLatency {
+            spec[kVTVideoEncoderSpecification_EnableLowLatencyRateControl] = kCFBooleanTrue
+        }
+        if codec == VideoStreamConfiguration.hevcCodec {
+            spec[kVTVideoEncoderSpecification_RequireHardwareAcceleratedVideoEncoder] = kCFBooleanTrue
+        }
         return VTCompressionSessionCreate(
             allocator: nil,
             width: Int32(width), height: Int32(height),
-            codecType: kCMVideoCodecType_H264,
-            encoderSpecification: spec,
+            codecType: codec == VideoStreamConfiguration.hevcCodec
+                ? kCMVideoCodecType_HEVC : kCMVideoCodecType_H264,
+            encoderSpecification: spec.isEmpty ? nil : spec as CFDictionary,
             imageBufferAttributes: nil,
             compressedDataAllocator: nil,
             outputCallback: nil,
@@ -2153,7 +2488,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         )
     }
 
-    private func setupEncoder(_ configuration: H264StreamConfiguration) throws {
+    private func setupEncoder(_ configuration: VideoStreamConfiguration) throws {
+        #if DEBUG
+        if configuration.codec == VideoStreamConfiguration.hevcCodec,
+           UserDefaults.standard.bool(forKey: "failHEVCSession") {   // late-fallback test knob
+            throw NSError(domain: "MacSender", code: 4, userInfo: [
+                NSLocalizedDescriptionKey: "HEVC encoder disabled by -failHEVCSession"])
+        }
+        #endif
         let width = configuration.encodedSize.width
         let height = configuration.encodedSize.height
         // Low-latency rate control: the hardware encoder emits every frame
@@ -2171,11 +2513,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // prevents. Measured on Apple silicon at a paced 60fps: 5.3ms mean
         // submit→emit without the spec vs 6.1ms with it, 1 frame held either
         // way. (Overfeeding it at ~320fps does queue ~8 frames, hence the cap.)
-        var status = createCompressionSession(width: width, height: height, lowLatency: lowLatency)
+        var status = createCompressionSession(width: width, height: height,
+                                              codec: configuration.codec, lowLatency: lowLatency)
         var usedFallback = false
         if encoder == nil, lowLatency {
             Log.info("VTCompressionSessionCreate failed with low-latency rate control (status \(status)) — retrying without an encoder specification")
-            status = createCompressionSession(width: width, height: height, lowLatency: false)
+            status = createCompressionSession(width: width, height: height,
+                                              codec: configuration.codec, lowLatency: false)
             usedFallback = true
         }
         guard let encoder else {
@@ -2191,19 +2535,37 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         // Low-latency settings: real-time, no B-frames, periodic keyframes.
         VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
         VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_AllowFrameReordering, value: kCFBooleanFalse)
-        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_ProfileLevel, value: kVTProfileLevel_H264_High_AutoLevel)
+        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_ProfileLevel,
+                             value: configuration.codec == VideoStreamConfiguration.hevcCodec
+                                 ? kVTProfileLevel_HEVC_Main_AutoLevel
+                                 : kVTProfileLevel_H264_High_AutoLevel)
         // No periodic IDRs: each one is a bitrate spike → transmit-time hiccup.
         // TCP never loses data, and we force a keyframe on reconnect/drop.
         VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_MaxKeyFrameInterval, value: 3600 as CFNumber)
         VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration, value: 60 as CFNumber)
         VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_MaxFrameDelayCount, value: 0 as CFNumber)
+        baseBitrate = configuration.bitrate
+        #if DEBUG
+        // -bitrate <Mbps>: dev override for the wired-bitrate A/B (#322 step 1).
+        let bitrateOverride = UserDefaults.standard.integer(forKey: "bitrate")
+        if bitrateOverride > 0 { baseBitrate = bitrateOverride * 1_000_000 }
+        #endif
         VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_AverageBitRate,
-                             value: configuration.bitrate as CFNumber)
+                             value: baseBitrate as CFNumber)
         VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_ExpectedFrameRate,
                              value: configuration.framesPerSecond as CFNumber)
         VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality, value: kCFBooleanTrue)
-        VTCompressionSessionPrepareToEncodeFrames(encoder)
-        Log.info("encoder ready: \(width)x\(height) H.264 \(configuration.bitrate / 1_000_000)Mbps @\(configuration.framesPerSecond)fps quality=\(quality.rawValue) lowLatencyRC=\(lowLatency && !usedFallback)\(usedFallback ? " (fallback)" : "")")
+        let prepareStatus = VTCompressionSessionPrepareToEncodeFrames(encoder)
+        if prepareStatus != noErr, configuration.codec == VideoStreamConfiguration.hevcCodec {
+            VTCompressionSessionInvalidate(encoder)
+            self.encoder = nil
+            throw NSError(domain: "MacSender", code: 4, userInfo: [
+                NSLocalizedDescriptionKey: "HEVC encoder could not prepare (status \(prepareStatus))"])
+        }
+        pipelineLock.lock()
+        consecutiveEncodeFailures = 0
+        pipelineLock.unlock()
+        Log.info("encoder ready: \(width)x\(height) \(configuration.codec.uppercased()) \(baseBitrate / 1_000_000)Mbps @\(configuration.framesPerSecond)fps quality=\(quality.rawValue) lowLatencyRC=\(lowLatency && !usedFallback)\(usedFallback ? " (fallback)" : "")")
     }
 
     // MARK: - Capture callback
@@ -2222,6 +2584,9 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         lastPixelBuffer = pixelBuffer
         lastCaptureAt = Date()
         capFrames += 1
+        #if DEBUG
+        scheduleSettleRefinement()
+        #endif
 
         // No receiver, or a pipeline stage is backed up: skip this frame.
         guard connectionReady else { return }
@@ -2260,6 +2625,59 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         dropReplayTimer?.cancel()
         dropReplayTimer = nil
     }
+
+    #if DEBUG
+    /// Restart the settle countdown (must be called on `queue`). A changed
+    /// frame also ends any refinement in progress and restores the base rate
+    /// before that frame is encoded.
+    private func scheduleSettleRefinement() {
+        guard refineFrames > 0 else { return }
+        cancelSettleRefinement()
+        let timer = DispatchSource.makeTimerSource(queue: queue)
+        let interval = max(1, Int(ceil(1_000 / Double(activeStreamConfigurationSnapshot?.framesPerSecond ?? 60))))
+        timer.schedule(deadline: .now() + .milliseconds(refineIdleMs),
+                       repeating: .milliseconds(interval))
+        refineRemaining = refineFrames
+        timer.setEventHandler { [weak self] in self?.refineStep() }
+        timer.resume()
+        refineTimer = timer
+    }
+
+    private func cancelSettleRefinement() {
+        guard let timer = refineTimer else { return }
+        timer.cancel()
+        refineTimer = nil
+        if refineRemaining < refineFrames { setEncoderBitrate(baseBitrate) }
+        refineRemaining = 0
+    }
+
+    private func refineStep() {
+        guard !stopped, connectionReady, let pixelBuffer = lastPixelBuffer else {
+            cancelSettleRefinement()
+            return
+        }
+        // Wait out backpressure; the timer ticks again one frame later.
+        if isPipelineBackedUp() { return }
+        if refineRemaining == refineFrames {
+            setEncoderBitrate(Int(Double(baseBitrate) * refineBoost))
+            Log.info("settle refinement: \(refineFrames) frames at \(refineBoost)x")
+        }
+        refineRemaining -= 1
+        encode(pixelBuffer, pts: CMClockGetTime(CMClockGetHostTimeClock()),
+               generation: captureGenerationNow)
+        if refineRemaining <= 0 {
+            refineTimer?.cancel()
+            refineTimer = nil
+            setEncoderBitrate(baseBitrate)
+        }
+    }
+
+    private func setEncoderBitrate(_ bitrate: Int) {
+        guard let encoder, bitrate > 0 else { return }
+        VTSessionSetProperty(encoder, key: kVTCompressionPropertyKey_AverageBitRate,
+                             value: bitrate as CFNumber)
+    }
+    #endif
 
     /// Re-encode the most recent pixel buffer once backpressure clears.
     private func replayLastFrameAfterDrop() {
@@ -2334,6 +2752,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             defer {
                 if !deliveryEnqueued { self.finishPendingEncode() }
             }
+            self.noteEncodeResult(succeeded: status == noErr && buffer != nil)
             guard status == noErr, let buffer else {
                 // A session rejecting every frame looks healthy in all other
                 // counters — the receiver just stays black. Don't be silent.
@@ -2375,6 +2794,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             )
             pipelineLock.unlock()
             handleEncodeFailureLogAction(logAction)
+            noteEncodeResult(succeeded: false)
         }
     }
 
@@ -2459,7 +2879,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         Log.info("unparseable control message (\(report.detail) bytes, \(report.count) since last report)")
     }
 
-    // MARK: - H.264 -> Annex B
+    // MARK: - VideoToolbox NALUs -> Annex B
 
     private func annexB(from sample: CMSampleBuffer) -> Data? {
         guard let block = CMSampleBufferGetDataBuffer(sample) else { return nil }
@@ -2470,16 +2890,24 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                 dataPointerOut: &ptr) == noErr, let ptr else { return nil }
 
         var out = Data(capacity: total + 128)
-        // On keyframes, prepend SPS/PPS (they live in the format description).
+        // On keyframes, prepend decoder parameter sets from the format description.
         if isKeyframe(sample), let fmt = CMSampleBufferGetFormatDescription(sample) {
-            for i in 0..<2 {           // index 0 = SPS, 1 = PPS
+            let hevc = CMFormatDescriptionGetMediaSubType(fmt) == kCMVideoCodecType_HEVC
+            for i in 0..<(hevc ? 3 : 2) {  // HEVC: VPS/SPS/PPS; H.264: SPS/PPS
                 var psPtr: UnsafePointer<UInt8>?
                 var psLen = 0
-                if CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                let status = hevc
+                    ? CMVideoFormatDescriptionGetHEVCParameterSetAtIndex(
                         fmt, parameterSetIndex: i,
                         parameterSetPointerOut: &psPtr,
                         parameterSetSizeOut: &psLen,
-                        parameterSetCountOut: nil, nalUnitHeaderLengthOut: nil) == noErr,
+                        parameterSetCountOut: nil, nalUnitHeaderLengthOut: nil)
+                    : CMVideoFormatDescriptionGetH264ParameterSetAtIndex(
+                        fmt, parameterSetIndex: i,
+                        parameterSetPointerOut: &psPtr,
+                        parameterSetSizeOut: &psLen,
+                        parameterSetCountOut: nil, nalUnitHeaderLengthOut: nil)
+                if status == noErr,
                    let psPtr {
                     out.append(contentsOf: startCode)
                     out.append(Data(bytes: psPtr, count: psLen))
@@ -2512,6 +2940,20 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// Control messages on the video channel (pong etc.) — framed JSON without
     /// start codes; the receiver routes payloads starting with '{'.
+    // MARK: - Power actions
+
+    /// Ask the receiver to shut down (PROTOCOL.md 6.6). Only offered when
+    /// its current hello lists the action; the receiver says "closing" and
+    /// the existing handler ends the session, or the cable drop does if the
+    /// goodbye never arrives.
+    func requestPower(_ action: PowerAction) {
+        queue.async { [weak self] in
+            guard let self else { return }
+            Log.info("asking the receiver to \(action.rawValue)")
+            self.sendJSONFrame("{\"type\":\"\(WireMessage.power)\",\"action\":\"\(action.rawValue)\"}")
+        }
+    }
+
     // MARK: - Version handshake (issue #132)
 
     /// Identify ourselves to the receiver: our protocol version and the oldest
@@ -2522,11 +2964,11 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// Announce the operating point before video. Legacy receivers ignore the
     /// unknown control type and continue decoding the unchanged H.264 stream.
-    private func sendStreamConfiguration(_ configuration: H264StreamConfiguration,
+    private func sendStreamConfiguration(_ configuration: VideoStreamConfiguration,
                                          on readyConnection: NWConnection? = nil) {
         let selected: [String: Any] = [
             "type": WireMessage.streamConfig,
-            "codec": H264StreamConfiguration.codec,
+            "codec": configuration.codec,
             "width": configuration.encodedSize.width,
             "height": configuration.encodedSize.height,
             "framesPerSecond": configuration.framesPerSecond,
@@ -2592,6 +3034,10 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
 
     private func sendFramedOnQueue(_ payload: Data) {
         guard let connection, connectionReady else { return }
+        guard peerAcceptsActiveCodec else {
+            needsKeyframe = true   // the frame after the confirming hello must be an IDR
+            return
+        }
         var header = UInt32(payload.count).bigEndian
         var frame = Data(bytes: &header, count: 4)
         frame.append(payload)
@@ -2623,13 +3069,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
         await MainActor.run { onStatus?(text) }
     }
 
-    private var activeStreamConfigurationSnapshot: H264StreamConfiguration? {
+    private var activeStreamConfigurationSnapshot: VideoStreamConfiguration? {
         pipelineLock.lock()
         defer { pipelineLock.unlock() }
         return activeStreamConfiguration
     }
 
-    private func setActiveStreamConfiguration(_ configuration: H264StreamConfiguration) {
+    private func setActiveStreamConfiguration(_ configuration: VideoStreamConfiguration) {
         pipelineLock.lock()
         activeStreamConfiguration = configuration
         frameRateLimiter = FrameRateLimiter(framesPerSecond: configuration.framesPerSecond)

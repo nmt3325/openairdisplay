@@ -1,4 +1,5 @@
 import SwiftUI
+import VideoToolbox
 import AVFoundation
 import UIKit
 import Combine
@@ -204,16 +205,16 @@ struct IdleView: View {
             }
 
             VStack(alignment: .leading, spacing: 14) {
-                Label("Plug in the USB cable and start the Mac app",
-                      systemImage: "cable.connector")
-                Label("Or choose this \(deviceKind) under WiFi in the Mac app",
-                      systemImage: "wifi")
-                Label("Keep this app open — streaming starts automatically",
-                      systemImage: "play.circle")
+                HintRow("Plug in the USB cable and open OpenDisplay on your computer",
+                        systemImage: "cable.connector")
+                HintRow("Or pick this \(deviceKind) under WiFi in OpenDisplay on your computer",
+                        systemImage: "wifi")
+                HintRow("Keep this app open. Streaming starts automatically.",
+                        systemImage: "play.circle")
             }
             .font(.subheadline)
             .padding(20)
-            .frame(maxWidth: 420)
+            .frame(maxWidth: 420, alignment: .leading)
             .background(Color(.secondarySystemBackground),
                         in: RoundedRectangle(cornerRadius: 16))
 
@@ -234,6 +235,30 @@ struct IdleView: View {
         .padding()
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(Color(.systemBackground))
+    }
+}
+
+/// One hint line: the symbol centered in a fixed-width column, so every
+/// row's text starts at the same edge whatever the symbol's width, and the
+/// text wraps instead of truncating.
+struct HintRow: View {
+    let text: String
+    let systemImage: String
+    @ScaledMetric(relativeTo: .subheadline) private var iconWidth: CGFloat = 24
+
+    init(_ text: String, systemImage: String) {
+        self.text = text
+        self.systemImage = systemImage
+    }
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Image(systemName: systemImage)
+                .frame(width: iconWidth)
+            Text(text)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
     }
 }
 
@@ -258,7 +283,7 @@ struct OnboardingView: View {
                         Text("One more app to go")
                             .font(.title2.bold())
                             .multilineTextAlignment(.center)
-                        Text("OpenAirDisplay turns this \(deviceKind) into a second screen for your Mac — but it needs the **OpenAirDisplay Mac app** running on a Mac connected by the same USB cable or on the same WiFi network.")
+                        Text("OpenAirDisplay turns this \(deviceKind) into a second screen for your Mac. It needs the **OpenAirDisplay Mac app** running on a Mac connected by the same USB cable or on the same WiFi network.")
                             .font(.body)
                             .foregroundStyle(.secondary)
                             .multilineTextAlignment(.center)
@@ -266,9 +291,9 @@ struct OnboardingView: View {
                     }
 
                     VStack(alignment: .leading, spacing: 14) {
-                        Label("Install the OpenAirDisplay Mac app on your Mac", systemImage: "1.circle.fill")
-                        Label("Connect the \(deviceKind) by USB, or join the same WiFi", systemImage: "2.circle.fill")
-                        Label("Keep this app open — streaming starts on its own", systemImage: "3.circle.fill")
+                        HintRow("Install the OpenAirDisplay Mac app on your Mac", systemImage: "1.circle.fill")
+                        HintRow("Connect the \(deviceKind) by USB, or join the same WiFi", systemImage: "2.circle.fill")
+                        HintRow("Keep this app open. Streaming starts automatically.", systemImage: "3.circle.fill")
                     }
                     .font(.subheadline)
                     .padding(20)
@@ -312,6 +337,7 @@ struct SettingsView: View {
     @Environment(\.dismiss) private var dismiss
     @AppStorage("showAnalytics") private var showAnalytics = false
     @AppStorage("metalRenderer") private var metalRenderer = false
+    // This fork is sideloaded, so there is no App Store listing to rate.
 
     private var version: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
@@ -323,7 +349,7 @@ struct SettingsView: View {
                 Section("Status") {
                     LabeledRow("Listening", value: "Port 9000")
                     LabeledRow("Connection",
-                               value: receiver.connected ? "Connected" : "Waiting for Mac")
+                               value: receiver.connected ? "Connected" : "Waiting for a computer")
                     if receiver.videoSize != .zero {
                         LabeledRow("Stream",
                                    value: "\(Int(receiver.videoSize.width))×\(Int(receiver.videoSize.height)) @ \(receiver.fps) fps")
@@ -340,7 +366,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Name")
                 } footer: {
-                    Text("Shown in the Mac app's WiFi connection menu. iOS hides this \(deviceKind)'s real name from apps, so set it here once.")
+                    Text("Shown in the WiFi list of OpenDisplay on your computer. iOS hides this \(deviceKind)'s real name from apps, so set it here once.")
                 }
 
                 Section {
@@ -361,7 +387,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Permissions")
                 } footer: {
-                    Text("WiFi mode needs Local Network access. If your Mac can't find this \(deviceKind), enable it under Settings → Privacy & Security → Local Network → OpenAirDisplay. USB mode works without it.")
+                    Text("WiFi mode needs Local Network access. If your computer can't find this \(deviceKind), enable it under Settings → Privacy & Security → Local Network → OpenAirDisplay. USB mode works without it.")
                 }
 
                 Section {
@@ -377,12 +403,12 @@ struct SettingsView: View {
                 }
 
                 Section {
-                    Label("USB: plug in the cable, run the Mac app — it connects automatically through the wire (lowest latency).",
+                    Label("USB: plug in the cable and open OpenDisplay on your computer. It connects through the wire on its own (lowest latency).",
                           systemImage: "cable.connector")
-                    Label("WiFi: both devices on the same network, then pick this \(deviceKind) in the Mac app's Connection menu.",
+                    Label("WiFi: both devices on the same network, then pick this \(deviceKind) in OpenDisplay on your computer.",
                           systemImage: "wifi")
                     Label("Rotate the \(deviceKind) for a vertical second monitor.",
-                          systemImage: "rectangle.portrait.rotate")
+                          systemImage: "rotate.right")
                     Label("Touch: tap to click, drag to drag, two-finger pan to scroll.",
                           systemImage: "hand.tap")
                 } header: {
@@ -399,11 +425,14 @@ struct SettingsView: View {
 
                 Section("About") {
                     LabeledRow("Version", value: version)
-                    Link(destination: URL(string: "https://github.com/nmt3325/openairdisplay")!) {
+                    Link(destination: ForkUpdates.repositoryURL) {
                         Label("GitHub — nmt3325/openairdisplay", systemImage: "link")
                     }
-                    Link(destination: macAppURL) {
-                        Label("Website", systemImage: "globe")
+                    Link(destination: URL(string: "https://github.com/peetzweg/opendisplay")!) {
+                        Label("GitHub: peetzweg/opendisplay", systemImage: "link")
+                    }
+                    Link(destination: URL(string: "https://ko-fi.com/peetzweg")!) {
+                        Label("Support OpenDisplay on Ko-fi", systemImage: "cup.and.saucer")
                     }
                 }
             }
@@ -494,11 +523,28 @@ final class ReceiverModel: ObservableObject {
     private var cancellables = Set<AnyCancellable>()
 
     init() {
+        // Offer HEVC wherever the hardware decodes it (A9 and later; the A8/A8X
+        // iPads stay on H.264). Panels here fit H.264's raster anyway, so HEVC
+        // buys quality per bit, which matters most over WiFi. Bounded by the
+        // panel in either orientation, so a large mirrored Mac display is
+        // scaled to what this screen can show instead of sent in full.
+        let native = UIScreen.main.nativeBounds.size   // portrait pixels
+        let longSide = Int(max(native.width, native.height))
+        var decodesHEVC = VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC)
+        #if DEBUG
+        // The simulator has no hardware decoder; -forceHEVCOffer YES exercises
+        // the HEVC receive path there with software decode.
+        if UserDefaults.standard.bool(forKey: "forceHEVCOffer") { decodesHEVC = true }
+        #endif
+        let hevc = decodesHEVC
+            ? VideoCapability(codec: "hevc", maxWidth: longSide, maxHeight: longSide,
+                              maxFrameRate: 60)
+            : nil
         receiver = StreamReceiver(displayLayer: AVSampleBufferDisplayLayer(),
                                   deviceKind: deviceKind,
-                                  fallbackServiceName: UIDevice.current.name)
+                                  fallbackServiceName: UIDevice.current.name,
+                                  hevcCapability: hevc)
         // Announce the native panel size to the Mac.
-        let native = UIScreen.main.nativeBounds.size   // portrait pixels
         receiver.setNativePanel(long: Int(max(native.width, native.height)),
                                 short: Int(min(native.width, native.height)),
                                 scale: Double(UIScreen.main.nativeScale))

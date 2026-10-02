@@ -3,7 +3,8 @@ run-name: OpenAirDisplay ${{ inputs.release_tag || github.ref_name }}
 
 on:
   push:
-    tags: ['p2p-wifi-*']
+    # Fork tags are the upstream version this build is based on, plus -air.
+    tags: ['v*-air']
   workflow_dispatch:
     inputs:
       source_sha:
@@ -13,9 +14,9 @@ on:
         description: Numeric app version (blank uses config.json)
         type: string
       release_tag:
-        description: New release tag
+        description: New release tag (upstream version + -air)
         required: true
-        default: p2p-wifi-1.2
+        default: v1.25.0-air
         type: string
       publish:
         description: Publish release and update feeds after verification
@@ -49,7 +50,8 @@ jobs:
           version="${REQUESTED_VERSION:-$(python3 -c 'import json; print(json.load(open(".github/fork-release/config.json"))["appVersion"])')}"
           tag="${REQUESTED_TAG:-$GITHUB_REF_NAME}"
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          [[ "$tag" =~ ^p2p-wifi-[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]
+          # The tag names the upstream release this build is based on: v1.25.0-air
+          [[ "$tag" == "v$version-air" ]]
           echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "app_version=$version" >> "$GITHUB_OUTPUT"
           echo "release_tag=$tag" >> "$GITHUB_OUTPUT"

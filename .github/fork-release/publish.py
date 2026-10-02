@@ -89,10 +89,17 @@ def environment():
             raise SystemExit('Missing environment variable: ' + name)
     patterns = {'APP_VERSION': r'\d+\.\d+\.\d+', 'APP_BUILD_NUMBER': r'\d+',
                 'SOURCE_SHA': r'[0-9a-f]{40}',
-                'RELEASE_TAG': r'p2p-wifi-\d+\.\d+(\.\d+)?'}
+                # A release is named after the upstream version it is built
+                # from, with this fork's suffix: upstream v1.25.0 -> v1.25.0-air.
+                'RELEASE_TAG': r'v\d+\.\d+\.\d+-air'}
     for name, pattern in patterns.items():
         if not re.fullmatch(pattern, env[name]):
             raise SystemExit('Malformed ' + name + ': ' + env[name])
+    expected_tag = 'v' + env['APP_VERSION'] + '-air'
+    if env['RELEASE_TAG'] != expected_tag:
+        raise SystemExit('RELEASE_TAG ' + env['RELEASE_TAG'] + ' does not match '
+                         'APP_VERSION ' + env['APP_VERSION']
+                         + ' (expected ' + expected_tag + ')')
     return env
 
 
@@ -568,14 +575,20 @@ def verify_identity_proofs(assets):
 
 def _notes_head():
     identifiers = CONFIG['bundleIDs']
+    upstream = 'v' + CONFIG['appVersion']
     return [
-        'OpenAirDisplay is now its own app rather than a rebuilt OpenDisplay: its own',
-        'bundle identifiers, its own update feed and its own signing certificate. The',
-        'last part is the important one, because it is what stops an update from',
-        'resetting the macOS permissions you granted.',
+        'OpenAirDisplay rebuilt on upstream OpenDisplay ' + upstream + '. Fork releases'
+        ' are named after the upstream version they are built from, plus `-air`.',
         '',
         "## What's Changed",
         '',
+        '- Rebased onto upstream ['
+        + upstream + '](' + GITHUB + 'peetzweg/opendisplay/releases/tag/' + upstream
+        + '), so everything upstream shipped up to that release is included.',
+        '- Apple peer-to-peer WiFi (AWDL) is re-applied on top: a direct WiFi link to'
+        ' the iPad or iPhone without a router, shown as `AWDL` in the performance'
+        ' overlay. Upstream\'s cable/WiFi detection is kept alongside it.',
+        '- The app icon is this fork\'s red mark.',
         '- The apps ship as `' + identifiers['mac'] + '`, `' + identifiers['receiver']
         + '` and `' + identifiers['ios'] + '`, so they install alongside OpenDisplay'
         ' instead of replacing it.',
@@ -587,8 +600,6 @@ def _notes_head():
         '- The release itself is built, signed, verified and published by'
         ' `.github/workflows/fork-release.yml`, which refuses to publish anything it'
         ' cannot verify twice.',
-        '- The peer-to-peer WiFi transport is unchanged from 1.1. This release is'
-        ' about identity, signing and updates.',
         '',
         '## Why the signature matters',
         '',
@@ -629,9 +640,10 @@ def release_notes(env, names):
         'xattr -dr com.apple.quarantine /Applications/OpenAirDisplay.app',
         '```',
         '',
-        '- Because the bundle identifiers changed, grant Accessibility, Screen'
-        ' Recording and Local Network once to OpenAirDisplay. Later OpenAirDisplay'
-        ' updates are designed to keep those grants.',
+        '- Coming from OpenDisplay: grant Accessibility, Screen Recording and Local'
+        ' Network once to OpenAirDisplay, because the bundle identifiers differ.'
+        ' Updating from an earlier OpenAirDisplay release keeps those grants, since'
+        ' the bundle identifiers and the signing certificate are unchanged.',
         '- An existing OpenDisplay install is untouched and keeps updating from'
         ' upstream. Remove it if you do not want two copies.',
         '- The IPA is unsigned. Re-sign it with your own identity (for example with'
@@ -662,8 +674,9 @@ def gh(args, capture=True):
 
 
 def release_title(env):
-    return ('Peer-to-peer WiFi ' + env['RELEASE_TAG'][len('p2p-wifi-'):]
-            + ' - OpenAirDisplay as its own app, with its own updates')
+    upstream = env['RELEASE_TAG'][:-len('-air')]
+    return ('OpenAirDisplay ' + env['RELEASE_TAG'] + ' - upstream OpenDisplay '
+            + upstream + ' plus peer-to-peer WiFi, own identity and own updates')
 
 
 def write_combined_checksums(assets, uploads):

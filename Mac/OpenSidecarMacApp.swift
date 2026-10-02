@@ -132,7 +132,6 @@ final class DeviceSession: ObservableObject, Identifiable {
 
     @Published var status = "Starting…"
     @Published var framesSent = 0
-    @Published var mbps = 0.0
     // The sender's start() threw: the pipeline is freed, only this row's
     // error text remains. A failed session must never swallow a fresh
     // connect for its device the way a live one does.
@@ -143,6 +142,9 @@ final class DeviceSession: ObservableObject, Identifiable {
     // "iPhone" / "iPad" from hello — naming fallback while (or in case)
     // lockdown hasn't resolved the device's real name.
     var deviceKind: String?
+    // Power actions the receiver offers on the live path (PROTOCOL.md 6.6).
+    // Every hello replaces it, so it follows the session on and off the cable.
+    @Published var powerActions: [PowerAction] = []
     // `target` names the identity the session was created for; the live
     // transport can migrate (cable-in upgrade, unplug failover) — these
     // track where the sender actually is right now.
@@ -172,6 +174,32 @@ final class DeviceSession: ObservableObject, Identifiable {
         if onUSB { return "USB" }
         if wired { return "Cable" }
         return peerToPeerInterface != nil ? "AWDL (direct)" : "WiFi (LAN)"
+    }
+
+    // The Display size control (extend only): the choice for this device
+    // and what each choice gives on it, from the latest hello.
+    private var lastHello: PhoneInfo?
+    @Published private(set) var displaySize: DisplaySize = .default
+    @Published private(set) var displaySizeOutcomes: [DisplaySizeOutcome] = []
+
+    func helloArrived(_ info: PhoneInfo) {
+        lastHello = info
+        refreshDisplaySize()
+    }
+
+    func setDisplaySize(_ size: DisplaySize) {
+        guard let info = lastHello else { return }
+        sender.setDisplaySize(size, for: info)
+        refreshDisplaySize()
+    }
+
+    /// Also called when the picker opens: the outcomes can change without a
+    /// hello (an HEVC failure, a refused 2x mode).
+    func refreshDisplaySize() {
+        guard let info = lastHello else { return }
+        displaySize = DisplaySizeStore.load(key: sender.displaySizeKey(for: info))
+        let outcomes = sender.displaySizeOutcomes(for: info)
+        if outcomes != displaySizeOutcomes { displaySizeOutcomes = outcomes }
     }
 
     init(id: String, target: ConnectionTarget, name: String, sender: MacSender) {
@@ -263,6 +291,22 @@ final class SenderController: ObservableObject {
     // action to confirm, not auto-grab.
     private var wifiAutoConnectArmed = false
     private let wifiAutoConnectDeadline = Date().addingTimeInterval(12)
+    // Services whose Bonjour record is currently seen over the direct
+    // host-to-host cable. Plugging that cable in is a deliberate act, so a
+    // record newly gaining such an interface connects like a cabled iPhone
+    // does; plain WiFi discovery never grabs a (possibly shared) receiver
+    // after the launch window. Transition-based, so a record that stays on
+    // the cable connects once, not on every browse update.
+    private var onDirectCable: Set<String> = []
+    // Service names the user disconnected while cabled. The record can
+    // vanish and return without a replug (the receiver's display sleeps and
+    // wakes, it restarts), and a cable-only receiver's unplug looks the
+    // same, so the opt-out simply holds until the user connects by hand.
+    // In memory: a relaunched sender starts fresh.
+    private var cableOptOut: Set<String> = []
+    // Every service seen on the cable this run: a Disconnect counts as a
+    // cable opt-out even while the record is briefly gone (receiver asleep).
+    private var everOnCable: Set<String> = []
 
     init() {
         startBrowsing()
@@ -293,6 +337,7 @@ final class SenderController: ObservableObject {
                 self.discovered = Array(results)
                 self.endSessionsWhoseServiceVanished()
                 self.autoConnect()
+                self.connectNewlyCabled()
             }
         }
         browser.start(queue: .main)
@@ -391,6 +436,44 @@ final class SenderController: ObservableObject {
     private func cabled(_ result: NWBrowser.Result) -> Bool {
         usbDevices.contains {
             sameDevice(result, $0) && !usbDisabled.contains("usb:\($0.udid)")
+        }
+    }
+
+    /// A Mac receiver just appeared on the direct cable: connect to it unless
+    /// a session already covers it (a live WiFi session moves onto the cable
+    /// through the sender's own upgrade probe instead).
+    private func connectNewlyCabled() {
+        let nowOnCable = Set(discovered.compactMap { result in
+            result.interfaces.contains(where: DirectCable.isDirectLink) ? serviceName(of: result) : nil
+        })
+        let plugged = nowOnCable.subtracting(onDirectCable)
+        onDirectCable = nowOnCable
+        everOnCable.formUnion(nowOnCable)
+        guard autoConnectEnabled, !plugged.isEmpty else { return }
+        for result in discovered {
+            guard let name = serviceName(of: result), plugged.contains(name),
+                  !cableOptOut.contains(name),
+                  activeSession(coveringWiFi: result) == nil,
+                  !alreadyServedOnCable(result),
+                  // A USB-attached phone belongs to the usbmux path and its
+                  // own opt-out, never this one.
+                  !usbDevices.contains(where: { sameDevice(result, $0) }) else { continue }
+            Log.info("\(name) appeared on the direct cable — connecting")
+            connect(to: .wifi(result))
+        }
+    }
+
+    /// A live session may already talk to this receiver under another
+    /// service name (renamed while streaming). Match the install id when the
+    /// browse result carries TXT; it often does not, so also treat any live
+    /// session already on the cable as covering it: a second cabled Mac
+    /// receiver at the same time is rare, and a click still connects it.
+    private func alreadyServedOnCable(_ result: NWBrowser.Result) -> Bool {
+        let id = txtID(of: result)
+        return sessions.contains { s in
+            guard !s.failed else { return false }
+            if let id, s.deviceID == id { return true }
+            return s.wired && s.deviceKind == "Mac"
         }
     }
 
@@ -550,7 +633,9 @@ final class SenderController: ObservableObject {
         // Connecting a device clears its "don't auto-connect" state.
         switch target {
         case .usb: usbDisabled.remove(id)
-        case .wifi: wifiRemembered.insert(id)
+        case .wifi(let result):
+            wifiRemembered.insert(id)
+            if userInitiated, let name = serviceName(of: result) { cableOptOut.remove(name) }
         }
 
         let transport: SenderTransport
@@ -588,6 +673,13 @@ final class SenderController: ObservableObject {
             guard let self, let session else { return }
             session.deviceID = info.id
             session.deviceKind = info.device
+            session.helloArrived(info)
+            let power = (info.power ?? []).compactMap(PowerAction.init(rawValue:))
+            if power != session.powerActions {
+                Log.info("session \(session.id) power actions: "
+                    + (power.isEmpty ? "none" : power.map(\.rawValue).joined(separator: ",")))
+                session.powerActions = power
+            }
             if case .usb(let udid?) = session.target, let installID = info.id {
                 self.installIDByUDID[udid] = installID
             }
@@ -596,9 +688,8 @@ final class SenderController: ObservableObject {
             // is cabled — take the upgrade opportunity right away.
             self.autoConnect()
         }
-        sender.onStats = { [weak session] frames, mbps in
+        sender.onStats = { [weak session] frames, _ in
             session?.framesSent = frames
-            session?.mbps = mbps
         }
         sender.onDisconnected = { [weak self, weak session] in
             // Device unplugged / left the network and stayed gone: end this
@@ -675,7 +766,11 @@ final class SenderController: ObservableObject {
     func disconnect(_ session: DeviceSession) {
         switch session.target {
         case .usb: usbDisabled.insert(session.id)
-        case .wifi: wifiRemembered.remove(session.id)
+        case .wifi:
+            wifiRemembered.remove(session.id)
+            if let name = session.wifiServiceName, everOnCable.contains(name) {
+                cableOptOut.insert(name)
+            }
         }
         // A migrated session is also reachable the other way — opt that side
         // out too, or auto-connect resurrects the device moments later.
@@ -1060,6 +1155,8 @@ struct SessionRow: View {
     let title: String
     @ObservedObject var session: DeviceSession
     let controller: SenderController
+    @State private var confirmingShutdown = false
+    @State private var choosingDisplaySize = false
 
     private var statusColor: Color {
         if session.status.hasPrefix("Extending") || session.status.hasPrefix("Mirroring")
@@ -1085,27 +1182,80 @@ struct SessionRow: View {
                     .lineLimit(2)
             }
             Spacer()
-            if session.mbps > 0 {
-                Text("\(String(format: "%.1f", session.mbps)) Mbit/s")
-                    .font(.system(.caption, design: .monospaced))
-                    .foregroundStyle(.secondary)
+            // A live session recovers on its own (liveness watchdog, redial,
+            // transport failover), so only a failed start gets a button.
+            if session.failed {
+                Button("Retry") { controller.retry(session) }
+                    .controlSize(.small)
+                    .help("Start this connection over")
             }
-            Button {
-                if session.failed {
-                    controller.retry(session)
-                } else {
-                    session.sender.forceReconnect()
+            if session.powerActions.contains(.shutdown) {
+                Button {
+                    confirmingShutdown = true
+                } label: {
+                    Image(systemName: "power")
                 }
-            } label: {
-                Image(systemName: "arrow.clockwise")
+                .controlSize(.small)
+                .help("Shut down \(title)")
+                .confirmationDialog("Shut down \(title) now?", isPresented: $confirmingShutdown) {
+                    Button("Shut Down", role: .destructive) { session.sender.requestPower(.shutdown) }
+                } message: {
+                    Text("Apps on it with unsaved changes can still stop the shutdown.")
+                }
             }
-            .controlSize(.small)
-            .help(session.failed
-                ? "Start this connection over"
-                : "Drop the connection and pair with the device again")
+            if !session.displaySizeOutcomes.isEmpty {
+                Button {
+                    choosingDisplaySize = true
+                } label: {
+                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                }
+                .controlSize(.small)
+                .help("Display size of \(title)")
+                .popover(isPresented: $choosingDisplaySize, arrowEdge: .bottom) {
+                    DisplaySizePicker(session: session)
+                }
+            }
             Button("Disconnect") { controller.disconnect(session) }
                 .controlSize(.small)
         }
+    }
+}
+
+/// The per-device desktop size, macOS Displays style: each choice with the
+/// exact desktop it gives underneath, and the stream when it is not 1:1.
+@MainActor
+struct DisplaySizePicker: View {
+    @ObservedObject var session: DeviceSession
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Display size").font(.headline)
+            Picker("Display size", selection: Binding(
+                get: { session.displaySize },
+                set: { session.setDisplaySize($0) })) {
+                ForEach(session.displaySizeOutcomes, id: \.choice) { outcome in
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(outcome.choice.title)
+                        Text(caption(for: outcome))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.vertical, 2)
+                    .tag(outcome.choice)
+                }
+            }
+            .pickerStyle(.radioGroup)
+            .labelsHidden()
+        }
+        .padding(14)
+        .fixedSize()
+        .onAppear { session.refreshDisplaySize() }
+    }
+
+    private func caption(for outcome: DisplaySizeOutcome) -> String {
+        let sameAsDefault = outcome.choice != .default
+            && outcome.desktop == session.displaySizeOutcomes.first(where: { $0.choice == .default })?.desktop
+        return outcome.caption + (sameAsDefault ? " (same as Default)" : "")
     }
 }
 

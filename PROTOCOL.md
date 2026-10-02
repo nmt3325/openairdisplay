@@ -134,7 +134,7 @@ Every message in **both directions** is length-prefixed:
 All receiver-to-sender frames are JSON control messages, so the sender
 needs no demux.
 
-Sender-to-receiver frames carry both H.264 video and JSON control messages
+Sender-to-receiver frames carry both video and JSON control messages
 on the same connection. At `pv <= 3` the receiver distinguishes them
 **heuristically**. A frame is a JSON control message if and only if all
 three hold:
@@ -170,8 +170,10 @@ control data to route it to the video path).
 
 ## 5. Video
 
-The video stream is **H.264 Annex B**, one *access unit* (one encoded
-picture) per wire frame.
+The implicit legacy video stream is **H.264 Annex B**. A sender may select
+**HEVC Annex B** only after an affirmative `hello.videoCaps` offer and must
+announce it in `streamConfig` before video. Each wire frame carries one
+*access unit* (one encoded picture).
 
 ### 5.1 Frame layout
 
@@ -191,9 +193,10 @@ picture) per wire frame.
   3-byte start codes; receivers MAY therefore split on the 4-byte pattern
   only. (A receiver that also handles 3-byte codes works today by accident;
   do not rely on it in either direction.)
-* **Keyframes carry their parameter sets.** Every IDR frame MUST be
-  prefixed with the current SPS and PPS NALUs. Non-keyframes carry only
-  slice data (plus optional SEI, which receivers MAY skip).
+* **Keyframes carry their parameter sets.** Every H.264 IDR frame MUST be
+  prefixed with SPS and PPS NALUs. Every HEVC IDR frame MUST be prefixed with
+  VPS, SPS, and PPS NALUs. Non-keyframes carry picture data (plus optional
+  SEI, which receivers MAY skip).
 * All slices of one picture MUST travel in one wire frame; receivers SHOULD
   decode each wire frame as one sample.
 * **No presentation timestamps** cross the wire. The stream is low-latency
@@ -208,7 +211,7 @@ quality presets). Receivers MUST take the video dimensions from the SPS,
 never from `hello`.
 
 When the stream changes size (device rotation, quality change), the sender
-simply starts sending frames with new SPS/PPS. Receivers MUST detect the
+simply starts sending frames with new parameter sets. Receivers MUST detect the
 parameter-set change, rebuild their decoder, and discard buffered frames
 from the old format.
 
@@ -247,7 +250,7 @@ Coordinates use the conventions of section 7.
 
 | `type` | Since | Fields | Purpose |
 |---|---|---|---|
-| `hello` | pv 1 | `pixelsWide`, `pixelsHigh`, `scale`, `device`?, `id`?, `pv`?, `displayMaxFrameRate`?, `videoCaps`? | Identify the panel and receiver video capabilities; (re)sent on connect and on rotation |
+| `hello` | pv 1 | `pixelsWide`, `pixelsHigh`, `scale`, `device`?, `id`?, `pv`?, `displayMaxFrameRate`?, `videoCaps`?, `panel`? | Identify the panel and receiver video capabilities; (re)sent on connect and on rotation |
 | `ping` | pv 1 | `t` | Liveness + clock sync probe |
 | `touch` | pv 1 | `phase`, `x`, `y`, `t`? | Finger input |
 | `scroll` | pv 1 | `dx`, `dy` | Two-finger scroll |
@@ -262,11 +265,18 @@ Coordinates use the conventions of section 7.
 connection, because the sender sizes its virtual display from it and can do
 nothing before it arrives.
 
-* `pixelsWide`, `pixelsHigh` (int): the panel size in **physical pixels**,
-  in the panel's **current orientation** (portrait swaps them).
-* `scale` (number): the device's UI scale factor (2 or 3 on Apple
-  hardware). The sender uses it to pick a sensible point-size for the
-  virtual display.
+* `pixelsWide`, `pixelsHigh` (int): **deprecated**, superseded by `panel`
+  (section 6.7) and removed at the next `pv` bump. The desktop the receiver
+  wants, as pixels of a 2x desktop, in the **current orientation**
+  (portrait swaps them). On iOS these are the physical pixels; the Mac
+  receiver sends its point size x 2, which is its physical pixels only on
+  a Retina panel. A sender that receives a valid `panel` ignores them.
+* `scale` (number): **deprecated** with them. The device's UI scale
+  factor (2 or 3 on Apple hardware, at least 2 from the Mac receiver).
+  Senders MUST NOT size the desktop from it; use `panel.scale`.
+* `panel` (object, optional): facts about the panel in its current
+  orientation, from which the sender decides the desktop (section 6.7).
+  Additive at `pv` 3, no bump.
 * `device` (string, optional): device kind for UI text, `"iPhone"` or
   `"iPad"` from the official receiver. Free-form.
 * `id` (string, optional): stable per-install UUID. MUST match the Bonjour
@@ -359,6 +369,7 @@ section 4.
 | `welcome` | pv 2 | `pv`, `min` | Sender's side of the version handshake |
 | `updateRequired` | pv 2 | `target`, `store`, `message` | Peer must update to continue |
 | `streamConfig` | pv 3 (additive) | `codec`, `width`, `height`, `framesPerSecond` | Selected video operating point |
+| `power` | pv 3 (additive) | `action` | Ask the receiver to power off (6.6) |
 
 **`pong`** echoes the `t` from the receiver's `ping` unchanged and adds
 `mt`: milliseconds since the Unix epoch on the sender's clock at the moment
@@ -492,8 +503,8 @@ instead of a silent failure.
 
 **`streamConfig`** announces the sender's selected video configuration before
 the first video frame and again after a reconnect or stream reconfiguration.
-`codec` is a lowercase token (`"h264"` today); `width` and `height` are encoded
-pixels; `framesPerSecond` is the maximum submission rate. Receivers MUST ignore
+`codec` is a lowercase token (`"h264"` or `"hevc"`); `width` and `height` are
+encoded pixels; `framesPerSecond` is the maximum submission rate. Receivers MUST ignore
 unknown fields. A receiver that gets video without `streamConfig` MUST assume
 the legacy H.264 stream. A sender MUST NOT select a non-H.264 codec unless the
 receiver affirmatively advertised it in `videoCaps`.
@@ -515,19 +526,30 @@ be freely combined. Unknown codecs and fields MUST be ignored. The sender
 intersects a receiver entry with its own encoder constraints and the requested
 desktop/quality policy, then reports the result with `streamConfig`.
 
-The official receiver currently advertises H.264 only. This structure makes a
-future codec additive without changing the meaning of panel dimensions or
-assuming support from a peer that merely ignored an unknown field.
+Every official receiver advertises H.264. A receiver with a hardware HEVC
+decoder also advertises HEVC: the Mac receiver up to 5120×2880 at 60 FPS, the
+iOS receiver up to its panel's long side on either axis at 60 FPS, within any
+decode budget. HEVC is additive: a peer that ignores the new capability keeps
+H.264.
+
+Codec choice is the sender's, with no user setting. The official sender picks
+HEVC whenever the receiver offers it and the sender can create a hardware
+HEVC encoder at the stream size (Apple silicon today), and H.264 otherwise.
+If the HEVC encoder fails later, the sender falls back to H.264 for the rest
+of that session. On a reconnect it neither announces nor sends HEVC until the new
+connection's `hello` offers it. Receivers MUST take the codec from
+`streamConfig`, not from the bitstream.
 
 The current H.264 sender also enforces the High@L5.2 frame-size and
 macroblock-rate limits locally. For a 16:9 5K source that codec rule selects
-4096×2304 at 55 FPS; it is not a receiver-model or 5K-iMac exception. A future
-codec supplies its own encoder constraints while using the same capability
-intersection and `streamConfig` announcement.
+4096×2304 at 55 FPS; it is not a receiver-model or 5K-iMac exception. The
+HEVC raster is bounded by the receiver's HEVC entry instead, so a 5K source
+goes out at 5120×2880 when both peers offer HEVC. `framesPerSecond` stays a
+ceiling: the encoder's real throughput decides the delivered rate.
 
 `hello.maxEncodeWide` / `maxEncodeHigh` is the legacy H.264 decode ceiling:
 
-`hello.pixelsWide/High` sets the desktop size, and without further
+`hello.pixelsWide/High` sets the desired desktop size, and without further
 information it also sets the stream size — but a big panel says nothing
 about the decoder behind it. Measured end to end, H.264 hardware decode
 stops below 5120 pixels wide on every Mac tested, current models
@@ -537,19 +559,101 @@ cleanly.
 
 Both fields are optional and additive (no `pv` bump). A receiver MAY
 advertise the largest stream, in pixels, it can actually decode at
-frame rate; a sender that understands the fields SHOULD keep the
-desktop at the announced panel size and, when the stream it would
-encode exceeds the ceiling, scale the stream down to fit inside it,
-preserving aspect. A ceiling the stream already fits inside changes
+frame rate; a sender that understands the fields SHOULD, when the
+stream it would encode exceeds the ceiling, scale the stream down to fit
+inside it, preserving aspect. The sender MAY then size the desktop to
+that stream instead of the announced panel, so capture is 1:1 and the
+picture is scaled only once, on the receiver; the reference sender does
+(#322). Receivers need no change either way: `streamConfig` announces
+the stream, and the desktop size is the sender's choice. A ceiling the stream already fits inside changes
 nothing, and a receiver that omits the fields gets the previous
 behavior (stream size follows the announced pixels and the sender's
 quality setting). Derive advertised ceilings from measured playback: a
 decode session that merely creates successfully proves nothing.
 
+All limits, `videoCaps` and the legacy ceiling alike, are the raster as
+presented **in the current orientation**. A receiver that rotates MUST
+re-send `hello` with its limits swapped (the Mac receiver does for a
+portrait display). A square envelope is valid in either orientation.
+
 During migration, a receiver MAY send both the legacy ceiling and
-`videoCaps`. A sender that understands both MUST satisfy both. Receiver limits
-do not replace sender validation: the sender must independently keep its H.264
-raster and rate within the selected encoder's constraints.
+`videoCaps`. For H.264, a sender that understands both MUST satisfy both. The
+legacy ceiling does not limit HEVC. Receiver limits do not replace sender
+validation: the sender must independently check that its encoder accepts the
+selected codec's raster and rate.
+
+### 6.6 Power actions (`hello.power`)
+
+A receiver used only as a screen often has no keyboard or mouse, so the
+sender can ask it to power off.
+
+* A receiver that can carry out power actions lists them in its `hello`:
+  `"power": ["shutdown"]`. It lists them **only on a session it would
+  obey them on**, and re-evaluates on every `hello`; absent means none.
+  Senders MUST NOT offer an action the current `hello` does not list.
+* The sender sends `{"type":"power","action":"shutdown"}`.
+* **Gate (normative).** Until the stream is authenticated, a receiver
+  MUST accept `power` only on a session that rides the direct host-to-host
+  cable, judged from its own side of the accepted connection: the path
+  uses no WiFi, cellular or loopback interface, the remote address is
+  link-local (`169.254/16` or `fe80::/10`), and the local interface
+  carrying the path holds no routable address (every Ethernet segment has
+  `fe80` addresses; only the host-to-host link has nothing else). Nothing
+  the sender sends can change this. A `power` message on any other session
+  MUST be ignored. Known gap: a switch with no DHCP server and no IPv6
+  router looks the same as the cable.
+* The message says **what**, the receiver decides **how** (the official
+  macOS receiver sends loginwindow `kAEShutDown`; a Linux receiver might
+  call `systemctl poweroff`). It powers off right away, without a
+  confirmation on the receiver; the sender confirms with its user first.
+* Before powering off, the receiver SHOULD announce `closing` (6.1) so the
+  sender ends the session instead of redialing.
+* Receivers that cannot power the device off (iOS, iPadOS) never list it.
+
+### 6.7 Panel facts (`hello.panel`)
+
+The **sender decides the size of the extended desktop**: the user's
+keyboard and mouse are on the sender, so the user's choice lives there.
+The receiver reports facts only:
+
+```json
+"panel": { "pixelsWide": 5120, "pixelsHigh": 2880, "scale": 2, "pointsWide": 2560, "pointsHigh": 1440 }
+```
+
+All values describe the panel in its **current orientation** (portrait
+swaps every pair).
+
+* `pixelsWide`, `pixelsHigh` (int, required): the **physical** pixels the
+  receiver can light up 1:1, minus any strip it never shows (the menu-bar
+  strip beside a notch). No stream needs to be larger. This is not the
+  backing store of a scaled mode: a 5K Mac at "More Space" (3200x1800
+  points) renders 6400x3600 pixels but still reports 5120x2880.
+* `scale` (number, required): the device's real backing scale: 1 on a
+  non-Retina Mac, 2 on Retina Macs and iPads, 3 on most iPhones. MAY be
+  fractional. A fact, not a request.
+* `pointsWide`, `pointsHigh` (int, optional, both or neither): the desktop
+  size the receiver itself currently runs (a Mac's "looks like" display
+  setting). Absent means the receiver has no such setting.
+
+The receiver MUST re-send `hello` whenever any `panel` value changes
+(rotation, a display-mode change on a Mac), even if the deprecated fields
+did not change.
+
+A sender uses `panel` only when `pixelsWide/High` are integers of at least
+2, `scale` is a finite number above 0, and `pointsWide/High` are both
+absent or both integers of at least 2. Otherwise it ignores the whole
+object (never part of it) and falls back to the deprecated fields. A
+malformed `panel` MUST NOT fail the `hello`.
+
+What the official sender builds from it (non-normative): a 2x desktop for
+`scale` 1.5 and above, else 1x; of `points` when present, else half the
+pixels at 2x, else the pixels at 1x. A default desktop larger than the best
+stream is shrunk to that stream so capture is 1:1 (6.5); every stream,
+mirror included, is bounded by `pixelsWide/High`. A receiver needs no
+change for any of this: `streamConfig` announces the stream.
+
+In mirror sessions `panel` only bounds the stream; the desktop is the
+sender's own display.
 
 ## 7. Coordinate spaces and units
 
@@ -562,8 +666,11 @@ sender).
 
 | What | Space | Units | Origin / sign |
 |---|---|---|---|
-| `hello.pixelsWide/High` | physical panel | pixels | current orientation |
-| `hello.scale` | none | UI scale factor | n/a |
+| `hello.pixelsWide/High` (deprecated) | desired desktop | pixels of a 2x desktop | current orientation |
+| `hello.scale` (deprecated) | none | UI scale factor | n/a |
+| `hello.panel.pixelsWide/High` | physical panel | pixels | current orientation |
+| `hello.panel.pointsWide/High` | receiver's own desktop | points | current orientation |
+| `hello.panel.scale` | none | real backing scale, may be fractional | n/a |
 | `touch.x/y`, `pencil.x/y`, `proximity.x/y` | video | normalized 0..1 | top-left, x right, y down |
 | `scroll.dx/dy` | video | **pixels** (not normalized) | natural-scrolling sign |
 | `cursor.x/y` | video | normalized 0..1 | top-left |
@@ -689,6 +796,8 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 3 | `pencil`, `proximity`; below pv 3 the receiver degrades stylus to `touch` |
 | 3 (additive) | `hello.cursorPort` and the UDP cursor side channel (6.3); optional, no bump |
 | 3 (additive) | `hello.videoCaps`, `displayMaxFrameRate`, and `streamConfig` (6.5); legacy peers remain implicit H.264 |
+| 3 (additive) | `hello.power` and `power` (6.6); direct cable only |
+| 3 (additive) | `hello.panel` (6.7); `pixelsWide/High/scale` deprecated, removed at the next bump |
 | 4 (reserved) | Typed frame header replacing the section 4 demux heuristic (two-phase migration) |
 
 ---
@@ -744,3 +853,5 @@ This file is versioned by git; the authoritative change log is
 |---|---|
 | 2026-08-19 | Initial specification, written against `pv` 3 |
 | 2026-08-26 | Additive: `hello.cursorPort` and the UDP cursor side channel (section 6.3) |
+| 2026-09-30 | Additive: `hello.power` and `power`, direct cable only (section 6.6) |
+| 2026-10-01 | Additive: `hello.panel`, the sender decides the desktop (section 6.7); limits are in the current orientation (6.5); `pixelsWide/High/scale` deprecated |

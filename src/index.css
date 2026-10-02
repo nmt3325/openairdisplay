@@ -309,6 +309,13 @@ th.os, td.os { border-left: 2px solid var(--accent); border-right: 2px solid var
   background: #fafafa; }
 thead th.os { border-top: 2px solid var(--accent); color: var(--fg); }
 tbody tr:last-child td.os { border-bottom: 2px solid var(--accent); }
+/* the Mac-receiver table has seven products: give it room and let row labels wrap */
+table.wide { min-width: 900px; }
+table.wide th, table.wide td { padding: 12px 9px; }
+table.wide th:first-child, table.wide td:first-child { white-space: normal; min-width: 150px; }
+thead th a { color: inherit; }
+.tbl-note { color: var(--muted); max-width: 80ch; margin: 0 0 16px; font-size: 0.92rem; }
+.tbl-scroll + .tbl-note { margin: 12px 0 0; }
 
 /* ---- FAQ ---- */
 .faq { border-top: 1px solid var(--line); }

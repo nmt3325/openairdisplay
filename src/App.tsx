@@ -321,7 +321,7 @@ export default function App() {
           <h2>A true extended display, the way it should be.</h2>
           <div className="fgrid">
             <div className="fcell"><span className="n">001</span><h3>No account, ever</h3><p>No sign-up, no email, no login. And unlike Apple Sidecar — which only works between devices on the <em>same</em> Apple ID — OpenDisplay pairs across different Apple IDs, so you can use a partner's or friend's iPad. Download both apps and go.</p></div>
-            <div className="fcell"><span className="n">002</span><h3>Low-latency pipeline</h3><p>Up to 60 FPS over USB. Hardware H.264 (VideoToolbox real-time mode), TCP_NODELAY, and frame-dropping backpressure with instant keyframe recovery keep it responsive.</p></div>
+            <div className="fcell"><span className="n">002</span><h3>Low-latency pipeline</h3><p>Up to 60 FPS over USB. Hardware H.264 or HEVC (VideoToolbox real-time mode), TCP_NODELAY, and frame-dropping backpressure with instant keyframe recovery keep it responsive.</p></div>
             <div className="fcell"><span className="n">003</span><h3>Two, even three screens</h3><p>You're not limited to one device. Run several iPads and iPhones at once, each as its own extended display — up to three has been tested, and you can freely mix iPads and iPhones. Arrange them all in System Settings like real monitors.</p></div>
             <div className="fcell"><span className="n">004</span><h3>Retina sharp</h3><p>Native Retina resolution — the virtual display matches your device panel pixel-for-pixel at HiDPI (@2x), so text looks exactly like it should.</p></div>
             <div className="fcell"><span className="n">005</span><h3>USB-wired, lowest latency</h3><p>Streams over your charging cable via usbmux. No network, no jitter — and your phone charges while it works.</p></div>
@@ -367,15 +367,42 @@ export default function App() {
               </thead>
               <tbody>
                 <tr><td>Price</td><td className="mark-yes os">Free &amp; open source</td><td>Free</td><td className="mark-no">Subscription</td><td className="mark-no">$$$ + dongle</td></tr>
-                <tr><td>iPhone as display</td><td className="mark-yes os">✓</td><td className="mark-no">✕</td><td className="mark-yes">✓</td><td className="mark-yes">✓</td></tr>
+                <tr><td>iPhone as display</td><td className="mark-yes os">✓</td><td className="mark-no">✕</td><td className="mark-yes">✓</td><td className="mark-no">✕</td></tr>
                 <tr><td>Mac as display</td><td className="mark-yes os">✓</td><td className="mark-no">✕</td><td className="mark-yes">✓</td><td className="mark-yes">✓</td></tr>
                 <tr><td>Different Apple IDs</td><td className="mark-yes os">✓</td><td className="mark-no">✕</td><td className="mark-yes">✓</td><td className="mark-yes">✓</td></tr>
-                <tr><td>No account / sign-up</td><td className="mark-yes os">✓</td><td>Apple&nbsp;ID</td><td className="mark-no">✕</td><td>—</td></tr>
-                <tr><td>Wired USB</td><td className="mark-yes os">✓</td><td className="mark-yes">✓</td><td className="mark-yes">✓</td><td className="mark-no">✕</td></tr>
-                <tr><td>Open source</td><td className="mark-yes os">✓</td><td>—</td><td className="mark-no">✕</td><td className="mark-no">✕</td></tr>
+                <tr><td>No account / sign-up</td><td className="mark-yes os">✓</td><td>Apple&nbsp;ID</td><td className="mark-no">✕</td><td>?</td></tr>
+                <tr><td>Wired USB</td><td className="mark-yes os">✓</td><td className="mark-yes">✓</td><td className="mark-yes">✓</td><td className="mark-yes">✓</td></tr>
+                <tr><td>Open source</td><td className="mark-yes os">✓</td><td className="mark-no">✕</td><td className="mark-no">✕</td><td className="mark-no">✕</td></tr>
               </tbody>
             </table>
           </div>
+
+          <h3 className="tbl-head">A spare Mac as the display</h3>
+          <p className="tbl-note">For a Mac receiver, Apple's answer is AirPlay to Mac, not Sidecar. Luna and Duet have
+          Mac-to-Mac modes, and a few newer apps do only this, mostly for a 5K iMac next to an Apple silicon laptop.</p>
+          <div className="tbl-scroll">
+            <table className="wide">
+              <thead>
+                <tr><th></th><th className="os">OpenDisplay</th><th>AirPlay to Mac</th><th>Luna</th><th>Duet Air</th><th><a href="https://github.com/swellweb/targetBridge">TargetBridge</a></th><th><a href="https://github.com/amineross/sharp">Sharp</a></th><th><a href="https://www.retinarelay.com/">RetinaRelay</a></th></tr>
+              </thead>
+              <tbody>
+                <tr><td>Price</td><td className="mark-yes os">Free &amp; open source</td><td>Free</td><td className="mark-no">$89.99 + dongle</td><td className="mark-no">Subscription</td><td className="mark-yes">Free &amp; open source</td><td className="mark-yes">Free &amp; open source</td><td>$49 one-time</td></tr>
+                <tr><td>Receiving Mac</td><td className="mark-yes os">macOS&nbsp;12+</td><td className="mark-no">iMac 2019+, MacBook 2018+</td><td>macOS&nbsp;10.13+</td><td>macOS&nbsp;10.14.6+</td><td>macOS&nbsp;11+</td><td>macOS&nbsp;10.15+</td><td>iMac 2012+</td></tr>
+                <tr><td>Intel Mac as sender</td><td className="mark-yes os">✓</td><td>2018+</td><td className="mark-yes">✓</td><td className="mark-yes">✓</td><td className="mark-no">✕</td><td className="mark-yes">✓</td><td className="mark-yes">✓</td></tr>
+                <tr><td>Wi-Fi</td><td className="mark-yes os">✓</td><td className="mark-yes">✓</td><td className="mark-yes">✓</td><td className="mark-yes">✓</td><td>Experimental</td><td className="mark-no">✕</td><td>Fallback</td></tr>
+                <tr><td>Cable</td><td className="mark-yes os">Thunderbolt, USB-C, Ethernet</td><td>USB</td><td className="mark-yes">✓</td><td>?</td><td>Thunderbolt</td><td>Ethernet</td><td className="mark-yes">Thunderbolt, USB&nbsp;3, Ethernet</td></tr>
+                <tr><td>Native 5K on a 5K iMac</td><td className="mark-yes os">✓ ~30&nbsp;fps</td><td>?</td><td className="mark-yes">✓</td><td>?</td><td className="mark-yes">✓ 48&nbsp;fps</td><td>Experimental</td><td className="mark-yes">✓ 60&nbsp;fps</td></tr>
+                <tr><td>No account, any Apple&nbsp;ID</td><td className="mark-yes os">✓</td><td className="mark-no">Same Apple&nbsp;ID</td><td className="mark-yes">✓</td><td className="mark-no">✕</td><td className="mark-yes">✓</td><td className="mark-yes">✓</td><td className="mark-yes">✓</td></tr>
+                <tr><td>Keyboard &amp; mouse at the receiver</td><td className="mark-no os">Planned</td><td className="mark-no">✕</td><td className="mark-yes">✓</td><td className="mark-yes">✓</td><td className="mark-yes">✓</td><td>?</td><td>?</td></tr>
+                <tr><td>Audio</td><td className="mark-no os">✕</td><td className="mark-yes">✓</td><td>?</td><td>?</td><td className="mark-yes">✓</td><td className="mark-yes">✓</td><td className="mark-yes">✓</td></tr>
+                <tr><td>Shut down the receiver from the sender</td><td className="mark-yes os">✓ over a cable</td><td>?</td><td>?</td><td>?</td><td>?</td><td>?</td><td>?</td></tr>
+                <tr><td>iPhone &amp; iPad too</td><td className="mark-yes os">✓</td><td className="mark-no">✕</td><td>iPad only</td><td className="mark-yes">✓</td><td className="mark-no">✕</td><td className="mark-no">✕</td><td className="mark-no">✕</td></tr>
+                <tr><td>Open source</td><td className="mark-yes os">✓</td><td className="mark-no">✕</td><td className="mark-no">✕</td><td className="mark-no">✕</td><td className="mark-yes">✓</td><td className="mark-yes">✓</td><td className="mark-no">✕</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p className="tbl-note">? means the project doesn't document it. Taken from each project's own site or README,
+          October 2026.</p>
         </div>
       </section>
 
@@ -434,6 +461,25 @@ export default function App() {
               the "allow accessory" prompt on each Mac). The sender moves the session onto the cable
               automatically, even one plugged in mid-session. Keyboard and mouse
               input from the receiving Mac is a follow-up.</p>
+            </details>
+            <details>
+              <summary>Which settings give the best picture?</summary>
+              <p>The defaults are already the sharpest setup: the sender on Best, the receiver at its Default
+              display setting, and the video fullscreen. A cable gives steadier latency than WiFi, but it
+              doesn't need to be fast: the stream uses at most 18 Mb/s, so any USB data cable works for iPhone
+              and iPad. For Mac to Mac, a Thunderbolt, USB4, Ethernet or USB-C data cable all give the same picture.
+              Balanced and Fast send fewer pixels: softer, but smoother, with lower latency.</p>
+              <p>On WiFi, set AirDrop on the sending Mac to Contacts Only or No One. With Everyone, the Mac's
+              WiFi pauses for about 75 ms twice a second to look for nearby devices, and the picture hitches each
+              time. In our measurements this one setting removed almost all WiFi hitches.</p>
+              <p>On a Mac receiver, the display setting sets the desktop's size, sent 1:1 up to what the codec
+              allows. With an Apple silicon sender and a receiver that decodes HEVC (Apple silicon, most Intel
+              Macs from 2017 on) that is up to 5120×2880, so a 5K iMac at Default gets its full 2560×1440 desktop.
+              Otherwise H.264 tops out at 4096×2304 (a 2048×1152 desktop). More Space gives more room, scaled once on the sender, so a little softer.
+              A non-Retina receiver, such as a 2013 iMac, gets its own 2560×1440 desktop at 1x, sent 1:1 at 60 fps.
+              Measured from an M5 Pro to a 5K iMac: Default + Best is the sharpest at about 30 fps; one or two
+              steps toward Larger Text (1600×900) keeps text crisp at about 55 fps; Default + Fast is soft but
+              about 58 fps for video. The README has the full table.</p>
             </details>
             <details>
               <summary>Is any of my screen data sent to a server?</summary>
