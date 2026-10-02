@@ -91,15 +91,19 @@ def environment():
                 'SOURCE_SHA': r'[0-9a-f]{40}',
                 # A release is named after the upstream version it is built
                 # from, with this fork's suffix: upstream v1.25.0 -> v1.25.0-air.
-                'RELEASE_TAG': r'v\d+\.\d+\.\d+-air'}
+                # Fork-only changes ship between upstream releases as a
+                # revision: v1.25.0-air.2, .3, ... The upstream number must not
+                # move for those, because no such upstream release exists.
+                'RELEASE_TAG': r'v\d+\.\d+\.\d+-air(\.([2-9]|[1-9]\d+))?'}
     for name, pattern in patterns.items():
         if not re.fullmatch(pattern, env[name]):
             raise SystemExit('Malformed ' + name + ': ' + env[name])
     expected_tag = 'v' + env['APP_VERSION'] + '-air'
-    if env['RELEASE_TAG'] != expected_tag:
+    if env['RELEASE_TAG'].split('-air')[0] != 'v' + env['APP_VERSION']:
         raise SystemExit('RELEASE_TAG ' + env['RELEASE_TAG'] + ' does not match '
                          'APP_VERSION ' + env['APP_VERSION']
-                         + ' (expected ' + expected_tag + ')')
+                         + ' (expected ' + expected_tag + ' or '
+                         + expected_tag + '.<revision>)')
     return env
 
 
@@ -674,7 +678,9 @@ def gh(args, capture=True):
 
 
 def release_title(env):
-    upstream = env['RELEASE_TAG'][:-len('-air')]
+    # Everything before the suffix is the upstream release this is built from;
+    # a trailing .2, .3 ... is this fork's own revision of that same base.
+    upstream = env['RELEASE_TAG'].split('-air')[0]
     return ('OpenAirDisplay ' + env['RELEASE_TAG'] + ' - upstream OpenDisplay '
             + upstream + ' plus peer-to-peer WiFi, own identity and own updates')
 
