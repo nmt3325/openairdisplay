@@ -766,8 +766,12 @@ def verify_published_assets(env, uploads, workspace):
         flagged = gh(['api', 'repos/' + REPO + '/releases/tags/' + tag,
                       '--jq', '.prerelease'])
         check(flagged == 'true', tag + ' is not flagged as a pre-release')
-        newest = gh(['api', 'repos/' + REPO + '/releases', '--jq',
-                     '[.[] | select(.prerelease)][0].tag_name'])
+        # The releases listing is not reliably newest-first, so pick the newest
+        # pre-release by date rather than by its position in the list.
+        newest = gh(['api', 'repos/' + REPO + '/releases?per_page=100', '--jq',
+                     '[.[] | select(.prerelease)]'
+                     ' | sort_by(.published_at // .created_at)'
+                     ' | last | .tag_name'])
         check(newest == tag, 'the newest pre-release is ' + newest + ', not ' + tag)
     else:
         latest = gh(['api', 'repos/' + REPO + '/releases/latest', '--jq', '.tag_name'])
