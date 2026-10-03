@@ -2407,9 +2407,14 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
                     velocity: obj["velocity"] as? Double ?? 0)
             }
         case "missionControl":
-            // Three fingers swiped up on the phone. Mission Control covers
-            // every display at once, so there is nothing to scope here.
-            inputInjector?.handleMissionControl()
+            // Three fingers swiped up or down on the phone. Mission Control
+            // covers every display at once, so there is nothing to scope here.
+            inputInjector?.handleMissionControl(
+                show: (obj["action"] as? String ?? "show") != "hide")
+        case "launchpad":
+            // Three fingers pinched in or spread out on the phone.
+            inputInjector?.handleLaunchpad(
+                show: (obj["action"] as? String ?? "show") != "hide")
         case "pencil":
             if let phase = obj["phase"] as? String,
                let x = obj["x"] as? Double,

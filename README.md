@@ -585,9 +585,13 @@ Shortcuts > Mission Control). A dock swipe needs no shortcut at all, which is
 why it is tried first.
 
 Swiping **up** with three fingers opens Mission Control, the same as a swipe up
-on a trackpad or pressing F3. It asks the Dock directly, so nothing has to be
-bound in Keyboard Shortcuts; where that is unavailable the Mac app posts ⌃↑
-instead, which is Mission Control's own default shortcut.
+on a trackpad or pressing F3, and swiping **down** leaves it again. Pinching
+**in** with three fingers opens Launchpad, and spreading them back **out**
+leaves that. Opening either asks the Dock directly, so nothing has to be bound
+in Keyboard Shortcuts; where that entry point is unavailable Mission Control
+falls back to ⌃↑, its own default shortcut. Leaving either sends Escape, which
+closes whichever is on screen — the Mac cannot see what the Dock is showing, and
+asking it to toggle would open what the gesture meant to close.
 
 Every swipe says what it did in the Mac log, so none of this has to be guessed
 at. A followed swipe logs `space drag: space 1 of 3` when the fingers start
@@ -596,7 +600,8 @@ second` and `space drag landed via a dock swipe: space 2 of 3`, or `space drag
 let go at 0.31 of a space at 0.2 spaces a second, so it slid back without
 switching` — both of which say how far the swipe had got and how fast it was
 still going when the fingers lifted. A three-finger swipe up logs `mission
-control: opened through the Dock`. On a system that has never followed a swipe,
+control: opened through the Dock`, a swipe down `mission control: closed with
+Escape`, and a pinch `launchpad: opened through the Dock`. On a system that has never followed a swipe,
 a committed release that changed nothing logs `space drag had no effect:
 replaying it as a single swipe` and hands the switch to the fallbacks, which
 log their own attempt in turn. With *Displays have separate Spaces* off, the

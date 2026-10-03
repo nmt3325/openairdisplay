@@ -256,7 +256,8 @@ Coordinates use the conventions of section 7.
 | `scroll` | pv 1 | `dx`, `dy` | Two-finger scroll |
 | `spaceSwitch` | pv 3 (additive) | `direction` | Three-finger swipe: switch this display's space |
 | `spaceDrag` | pv 3 (additive) | `phase`, `progress`, `velocity` | The same swipe, reported as it moves |
-| `missionControl` | pv 3 (additive) | none | Three-finger swipe up: open Mission Control |
+| `missionControl` | pv 3 (additive) | `action` | Three fingers up or down: Mission Control, or leaving it |
+| `launchpad` | pv 3 (additive) | `action` | Three fingers pinched in or out: Launchpad, or leaving it |
 | `pencil` | pv 3 | `phase`, `x`, `y`, `pressure`, `azimuth`, `altitude`, `rotation`, `t`? | Stylus input |
 | `proximity` | pv 3 | `entering`, `x`, `y` | Stylus hover enter/leave |
 | `kf` | pv 1 | none | Request an IDR (section 5.3) |
@@ -362,11 +363,20 @@ receiver always streams `spaceDrag` and sends `spaceSwitch` on release only
 while no `spaceDragOK` (section 6.2) has arrived on this connection, so a
 sender that follows the gesture never sees the one-shot message.
 
-**`missionControl`** (pv 3, additive) carries no arguments: three fingers
-swiped up, which opens Mission Control. Mission Control shows every display at
-once rather than belonging to one of them, so the message says nothing about
-which display the gesture happened on. Senders older than this message ignore
-the unknown type, so the gesture simply does nothing.
+**`missionControl`** (pv 3, additive) carries `action` (string, optional,
+default `"show"`): `"show"` for three fingers swiped up, which opens Mission
+Control, and `"hide"` for three swiped down, which leaves it. Mission Control
+shows every display at once rather than belonging to one of them, so the
+message says nothing about which display the gesture happened on.
+
+**`launchpad`** (pv 3, additive) carries the same `action`: `"show"` for three
+fingers pinched in, which opens Launchpad, and `"hide"` for three spread back
+out, which leaves it.
+
+A sender SHOULD treat `"hide"` as leaving whatever of the two is on screen
+rather than as a toggle, since a receiver has no way to tell what the Mac is
+showing. Senders older than these messages ignore the unknown types, so the
+gestures simply do nothing.
 
 **`pencil`** (pv 3) carries `phase` (string): `"down"`, `"move"`, `"up"`,
 or `"hover"`; `x`, `y`: normalized position; `pressure` (number): 0 to 1;
@@ -842,7 +852,7 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 3 (additive) | `hello.panel` (6.7); `pixelsWide/High/scale` deprecated, removed at the next bump |
 | 3 (additive) | `spaceSwitch` (6.1); unknown to older senders, which ignore it |
 | 3 (additive) | `spaceDrag` and its `spaceDragOK` acknowledgement (6.1, 6.2); receivers fall back to `spaceSwitch` for senders without it |
-| 3 (additive) | `missionControl` (6.1); unknown to older senders, which ignore it |
+| 3 (additive) | `missionControl` and `launchpad` (6.1); unknown to older senders, which ignore them |
 | 4 (reserved) | Typed frame header replacing the section 4 demux heuristic (two-phase migration) |
 
 ---

@@ -265,11 +265,15 @@ final class InputInjector {
         }
     }
 
-    /// Three fingers swiped up. Mission Control is one view of every display at
-    /// once rather than something that happens on one of them, so this needs no
-    /// pointer warp and no per-display scoping.
-    func handleMissionControl() {
-        if MissionControl.show() {
+    /// Three fingers swiped up, or down to leave again. Mission Control is one
+    /// view of every display at once rather than something that happens on one
+    /// of them, so this needs no pointer warp and no per-display scoping.
+    func handleMissionControl(show: Bool) {
+        guard show else {
+            dismissOverlay("mission control")
+            return
+        }
+        if DockOverlay.missionControl() {
             Log.info("mission control: opened through the Dock")
             return
         }
@@ -281,6 +285,30 @@ final class InputInjector {
         postKey(virtualKey: 0x3B, keyDown: false, flags: [])
         Log.info("mission control: the Dock entry point is unavailable, so posted"
                  + " Control+Up instead")
+    }
+
+    /// Three fingers pinched in, or spread back out to leave again.
+    func handleLaunchpad(show: Bool) {
+        guard show else {
+            dismissOverlay("launchpad")
+            return
+        }
+        if DockOverlay.launchpad() {
+            Log.info("launchpad: opened through the Dock")
+            return
+        }
+        Log.info("launchpad: the Dock entry point is unavailable, and Launchpad"
+                 + " has no shortcut of its own to fall back on")
+    }
+
+    /// Escape leaves Mission Control and Launchpad alike. Asking the Dock to
+    /// toggle them would be the tidier exit, but whether either is on screen is
+    /// not readable from outside the Dock, so a toggle aimed at closing one
+    /// would open it on any guess that was wrong. Escape can only ever close.
+    private func dismissOverlay(_ what: String) {
+        postKey(virtualKey: 0x35, keyDown: true, flags: [])   // kVK_Escape
+        postKey(virtualKey: 0x35, keyDown: false, flags: [])
+        Log.info("\(what): closed with Escape")
     }
 
     private func beginDrag() {
@@ -761,10 +789,12 @@ final class InputInjector {
 /// only *changing* a space from outside Dock that requires a scripting
 /// addition — so the SkyLight symbols are resolved lazily and every failure
 /// degrades to "unknown" rather than to a crash on the next macOS.
-/// Mission Control, through the notification the Dock itself listens for: the
-/// same path F3 and a trackpad swipe up end up taking, and unlike a gesture it
-/// needs nothing bound in Keyboard Shortcuts.
-private enum MissionControl {
+/// Mission Control and Launchpad, through the notifications the Dock itself
+/// listens for: the same path F3, F4 and the trackpad gestures end up taking,
+/// and unlike a gesture they need nothing bound in Keyboard Shortcuts. Both
+/// notifications toggle whatever they name, so they are only ever asked to
+/// open; closing goes through Escape, which cannot open anything by mistake.
+private enum DockOverlay {
     private typealias SendNotificationFn = @convention(c) (CFString, Int32) -> Void
 
     private static let handles = [
@@ -783,12 +813,16 @@ private enum MissionControl {
         return nil
     }()
 
+    static func missionControl() -> Bool { send("com.apple.expose.awake") }
+
+    static func launchpad() -> Bool { send("com.apple.launchpad.toggle") }
+
     /// True once the request has gone out, which is as much as this entry point
-    /// reports: it returns nothing, and whether Mission Control is open is not
-    /// readable from outside the Dock.
-    static func show() -> Bool {
+    /// reports: it returns nothing, and what the Dock is showing is not
+    /// readable from outside it.
+    private static func send(_ name: String) -> Bool {
         guard let sendNotification else { return false }
-        sendNotification("com.apple.expose.awake" as CFString, 0)
+        sendNotification(name as CFString, 0)
         return true
     }
 }
