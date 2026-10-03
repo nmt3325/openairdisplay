@@ -71,6 +71,9 @@ final class InputInjector {
     // Dock reads a swipe as a sequence, and a reordered one reads as two half
     // gestures.
     private let spaceDragQueue = DispatchQueue(label: "space-drag")
+    /// Opening Mission Control or Launchpad can need keystrokes with gaps
+    /// between them, which have no business blocking the control connection.
+    private let overlayQueue = DispatchQueue(label: "dock-overlay")
 
     // Pencil-only synthetic click counting — tablet events don't get click
     // state from the Window Server, so we mirror macOS double-click prefs here.
@@ -293,12 +296,54 @@ final class InputInjector {
             dismissOverlay("launchpad")
             return
         }
+        // macOS 26 retired Launchpad: the Dock has nothing left to open, so
+        // the gesture opens what replaced it instead.
+        let version = ProcessInfo.processInfo.operatingSystemVersion
+        guard version.majorVersion < 26 else {
+            openAppsView(macOS: version.majorVersion)
+            return
+        }
         if DockOverlay.launchpad() {
             Log.info("launchpad: opened through the Dock")
             return
         }
-        Log.info("launchpad: the Dock entry point is unavailable, and Launchpad"
-                 + " has no shortcut of its own to fall back on")
+        // Launchpad is an app as much as a Dock trick, and opening it works
+        // wherever the private notification cannot be reached.
+        let app = URL(fileURLWithPath: "/System/Applications/Launchpad.app")
+        guard FileManager.default.fileExists(atPath: app.path) else {
+            Log.info("launchpad: neither the Dock entry point nor Launchpad"
+                     + " itself is available on this system")
+            return
+        }
+        NSWorkspace.shared.openApplication(at: app,
+                                           configuration: NSWorkspace.OpenConfiguration())
+        Log.info("launchpad: the Dock entry point is unavailable, so opened"
+                 + " Launchpad itself instead")
+    }
+
+    /// Spotlight's apps view, which is where macOS 26 put Launchpad: Command
+    /// and Space open Spotlight, and Command and 1 switch it to the apps.
+    /// Spotlight has to be up before it can be told which list to show, so the
+    /// two go out with a gap between them and off the control thread.
+    private func openAppsView(macOS version: Int) {
+        Log.info("launchpad: macOS \(version) has no Launchpad, so opening"
+                 + " Spotlight's apps view instead")
+        overlayQueue.async { [weak self] in
+            guard let self else { return }
+            self.postShortcut(virtualKey: 49)    // kVK_Space
+            usleep(250_000)
+            self.postShortcut(virtualKey: 18)    // kVK_ANSI_1
+        }
+    }
+
+    /// Command plus one key, bracketed by the modifier's own key events the way
+    /// a real keyboard sends them: the Window Server's hotkey layer reads that
+    /// live modifier state and ignores a key carrying nothing but `flags`.
+    private func postShortcut(virtualKey: CGKeyCode) {
+        postKey(virtualKey: 0x37, keyDown: true, flags: .maskCommand)  // kVK_Command
+        postKey(virtualKey: virtualKey, keyDown: true, flags: .maskCommand)
+        postKey(virtualKey: virtualKey, keyDown: false, flags: .maskCommand)
+        postKey(virtualKey: 0x37, keyDown: false, flags: [])
     }
 
     /// Escape leaves Mission Control and Launchpad alike. Asking the Dock to

@@ -722,6 +722,7 @@ struct VideoLayerView: UIViewRepresentable {
         pan.maximumNumberOfTouches = 3
         pan.delegate = view
         view.addGestureRecognizer(pan)
+        view.spacePan = pan
 
         // Three fingers pinching: in for Launchpad, out to leave it again. It
         // shares its fingers with the pan above, so both recognizers have to be
@@ -758,6 +759,11 @@ struct VideoLayerView: UIViewRepresentable {
 
     final class VideoView: UIView, UIGestureRecognizerDelegate {
         weak var receiver: StreamReceiver?
+        /// The pan that shares its fingers with the pinch. A pinch recognizer
+        /// follows two touches of its own, so a third finger is only ever
+        /// visible through the pan, which counts them from the moment they
+        /// land — before it has recognized anything.
+        weak var spacePan: UIPanGestureRecognizer?
         var metalRenderer: MetalVideoRenderer?
         let inputEngine = InputCaptureEngine()
 
@@ -1073,19 +1079,39 @@ struct VideoLayerView: UIViewRepresentable {
 
         /// How far three fingers have to close, or open, before the pinch counts
         /// — as a share of how far apart they started.
-        private let launchpadPinchIn: CGFloat = 0.75
-        private let launchpadPinchOut: CGFloat = 1.3
+        private let launchpadPinchIn: CGFloat = 0.8
+        private let launchpadPinchOut: CGFloat = 1.25
         /// Launchpad is opened or left once per pinch, however far it carries on.
         private var pinchHasFired = false
+        /// The most fingers the pinch has ever had. A finger that drifts out of
+        /// the recognizer's reckoning mid-pinch should not turn a three-finger
+        /// gesture into a two-finger one halfway through.
+        private var pinchTouchPeak = 0
+        /// Logged once per pinch, so a gesture that never reaches the Mac can
+        /// be told apart from one the Mac did nothing with.
+        private var pinchLogged = false
 
         /// Three fingers pinching: in opens Launchpad, out leaves it. Two
         /// fingers are a scroll, not a pinch, so they are left alone here.
+        /// How many fingers this pinch has, counted wherever they can be seen.
+        private func pinchFingers(_ recognizer: UIPinchGestureRecognizer) -> Int {
+            max(recognizer.numberOfTouches, spacePan?.numberOfTouches ?? 0)
+        }
+
         @objc func didPinch(_ recognizer: UIPinchGestureRecognizer) {
             switch recognizer.state {
             case .began:
                 pinchHasFired = false
+                pinchLogged = false
+                pinchTouchPeak = pinchFingers(recognizer)
             case .changed:
-                guard !pinchHasFired, recognizer.numberOfTouches >= 3 else { return }
+                pinchTouchPeak = max(pinchTouchPeak, pinchFingers(recognizer))
+                guard !pinchHasFired, pinchTouchPeak >= 3 else { return }
+                if !pinchLogged {
+                    pinchLogged = true
+                    Log.info("three-finger pinch: watching it"
+                             + " (\(pinchTouchPeak) fingers)")
+                }
                 let show: Bool
                 if recognizer.scale <= launchpadPinchIn {
                     show = true
@@ -1103,6 +1129,8 @@ struct VideoLayerView: UIViewRepresentable {
                 receiver?.sendLaunchpad(show: show)
             default:
                 pinchHasFired = false
+                pinchLogged = false
+                pinchTouchPeak = 0
             }
         }
 

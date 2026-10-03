@@ -371,7 +371,8 @@ message says nothing about which display the gesture happened on.
 
 **`launchpad`** (pv 3, additive) carries the same `action`: `"show"` for three
 fingers pinched in, which opens Launchpad, and `"hide"` for three spread back
-out, which leaves it.
+out, which leaves it. A sender whose system has no Launchpad — macOS 26 retired
+it in favour of Spotlight's apps view — SHOULD open whatever took its place.
 
 A sender SHOULD treat `"hide"` as leaving whatever of the two is on screen
 rather than as a toggle, since a receiver has no way to tell what the Mac is
