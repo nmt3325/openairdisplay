@@ -44,7 +44,7 @@ final class InputInjector {
     private var inRange = false
     // Space switching: one swipe per animation, see handleSpaceSwitch.
     private var lastSpaceSwitch: CFAbsoluteTime = 0
-    private let spaceSwitchCooldown: CFTimeInterval = 0.45
+    private let spaceSwitchCooldown: CFTimeInterval = 0.6
     // Confirming a switch means reading the layout back after the animation,
     // which has no business happening on the control channel's thread.
     private let spaceVerifyQueue = DispatchQueue(label: "space-switch-verify")
@@ -162,8 +162,11 @@ final class InputInjector {
     ///
     /// 1. A synthetic dock swipe (private CGS event type 30) — the gesture the
     ///    trackpad itself produces, so it depends on no shortcut being
-    ///    assigned. macOS 27 validates these against a serialized IOHID queue
-    ///    payload, hence the two variants.
+    ///    assigned. It is sent as a gradual drag, which is what makes the
+    ///    Dock animate the desktops sliding past; the instant form that
+    ///    skips the animation is kept as a fallback. macOS 27 validates
+    ///    these against a serialized IOHID queue payload, hence the
+    ///    variants.
     /// 2. Control+Arrow, which is merely a Mission Control *shortcut*: when it
     ///    is unassigned or taken by another app nothing happens at all, which
     ///    is exactly what the first round of field logs showed.
@@ -174,8 +177,9 @@ final class InputInjector {
         case "right": right = true
         default: return
         }
-        // The switch animation runs ~0.4s and queued repeats stack into a
-        // sprint across every space, so swallow anything that close behind.
+        // A swipe plays out over ~0.2s and the switch animates for another
+        // ~0.4s, and queued repeats stack into a sprint across every space,
+        // so swallow anything that close behind.
         // Attempts are serialized on one queue, which also keeps a slow
         // fallback chain from piling up behind a burst of swipes.
         let now = CFAbsoluteTimeGetCurrent()
@@ -231,10 +235,7 @@ final class InputInjector {
 
         for method in methodOrder {
             post(method, right: right)
-            // Believe the layout only after the switch has had time to finish.
-            usleep(500_000)
-            guard let after = Spaces.layout(of: displayID),
-                  after.current != before.current else { continue }
+            guard let after = settledLayout(differingFrom: before) else { continue }
             Log.info("space switch landed via \(method.summary): space \(after.current)"
                      + " of \(after.count)")
             remember(method)
@@ -245,15 +246,33 @@ final class InputInjector {
                  + " both ignored. \(Hotkeys.spaceSwitchDiagnosis())")
     }
 
+    /// The space counter flips partway through the switch, and a gradual swipe
+    /// takes longer to play out than an instant one, so poll rather than bet on
+    /// a single deadline.
+    private func settledLayout(differingFrom before: (count: Int, current: Int))
+        -> (count: Int, current: Int)? {
+        for _ in 0..<8 {
+            usleep(100_000)
+            if let now = Spaces.layout(of: displayID), now.current != before.current {
+                return now
+            }
+        }
+        return nil
+    }
+
     /// Methods to try, best bet first.
     private var methodOrder: [SpaceSwitchMethod] {
-        // macOS 27 rejects a dock swipe that carries no IOHID payload, and
+        // Both encodings are tried as a gradual drag before either is tried as
+        // an instant flick, because a flick switches without animating.
+        // macOS 27 rejects a dock swipe that carries no IOHID payload and
         // earlier versions do not expect one, so lead with whichever matches
-        // this system and keep the other as a fallback.
+        // this system.
         var order: [SpaceSwitchMethod] =
             ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 27
-                ? [.dockSwipeWithPayload, .dockSwipe, .missionControlShortcut]
-                : [.dockSwipe, .dockSwipeWithPayload, .missionControlShortcut]
+                ? [.dockSwipeWithPayload, .dockSwipe, .dockSwipeWithPayloadFlick,
+                   .dockSwipeFlick, .missionControlShortcut]
+                : [.dockSwipe, .dockSwipeWithPayload, .dockSwipeFlick,
+                   .dockSwipeWithPayloadFlick, .missionControlShortcut]
         if let preferredMethod, let index = order.firstIndex(of: preferredMethod) {
             order.remove(at: index)
             order.insert(preferredMethod, at: 0)
@@ -262,11 +281,12 @@ final class InputInjector {
     }
 
     private func post(_ method: SpaceSwitchMethod, right: Bool) {
-        switch method {
-        case .dockSwipe: DockSwipe.post(right: right, withPayload: false)
-        case .dockSwipeWithPayload: DockSwipe.post(right: right, withPayload: true)
-        case .missionControlShortcut: postSpaceShortcut(right: right)
+        guard method != .missionControlShortcut else {
+            postSpaceShortcut(right: right)
+            return
         }
+        DockSwipe.post(right: right, withPayload: method.carriesPayload,
+                       flick: method.isFlick)
     }
 
     private func postSpaceShortcut(right: Bool) {
@@ -585,13 +605,26 @@ private enum Hotkeys {
 /// has to cooperate. Raw values are persisted, so leave them alone.
 private enum SpaceSwitchMethod: String {
     case dockSwipe = "dock-swipe"
+    case dockSwipeFlick = "dock-swipe-flick"
     case dockSwipeWithPayload = "dock-swipe-payload"
+    case dockSwipeWithPayloadFlick = "dock-swipe-payload-flick"
     case missionControlShortcut = "control-arrow"
+
+    /// Whether the whole swipe is handed over at once, which switches
+    /// immediately and so skips the transition animation.
+    var isFlick: Bool { self == .dockSwipeFlick || self == .dockSwipeWithPayloadFlick }
+
+    var carriesPayload: Bool {
+        self == .dockSwipeWithPayload || self == .dockSwipeWithPayloadFlick
+    }
 
     var summary: String {
         switch self {
         case .dockSwipe: return "a dock swipe"
+        case .dockSwipeFlick: return "an instant dock swipe"
         case .dockSwipeWithPayload: return "a dock swipe with an IOHID payload"
+        case .dockSwipeWithPayloadFlick:
+            return "an instant dock swipe with an IOHID payload"
         case .missionControlShortcut: return "the Control+Arrow shortcut"
         }
     }
@@ -631,50 +664,91 @@ private enum DockSwipe {
     private static let changed: Int64 = 2
     private static let ended: Int64 = 4
 
-    /// Replays a whole swipe: began, changed, ended. Each dock-control event
-    /// travels with the companion gesture event a trackpad would pair it with.
-    static func post(right: Bool, withPayload: Bool) {
-        for phase in [began, changed, ended] {
-            guard let event = make(phase: phase, right: right, withPayload: withPayload)
-            else { continue }
-            event.post(tap: .cgSessionEventTap)
-            if let companion = CGEvent(source: nil) {
-                setInt(companion, eventType, gesture)
-                companion.post(tap: .cgSessionEventTap)
+    /// Replays a whole swipe: began, a run of changed events, then ended. Each
+    /// dock-control event travels with the companion gesture event a trackpad
+    /// would pair it with.
+    ///
+    /// A trackpad reports a swipe as a stream of small steps and the Dock
+    /// slides the desktops along with them — that sliding *is* the transition
+    /// animation. Handing over the whole distance in one event with a large
+    /// release velocity makes the switch happen at once instead, so ramp the
+    /// gesture by default and keep the instant form for systems that ignore a
+    /// gradual one.
+    static func post(right: Bool, withPayload: Bool, flick: Bool) {
+        let hair = Double(Float.leastNonzeroMagnitude)
+        guard !flick else {
+            for phase in [began, changed, ended] {
+                send(phase: phase, progress: 1, step: hair,
+                     right: right, withPayload: withPayload, flick: true)
             }
+            return
         }
+        // Twelve steps over ~0.2s: about as long as a real three-finger swipe
+        // takes, and slow enough for the slide to be visible.
+        let steps = 12
+        send(phase: began, progress: 0, step: hair,
+             right: right, withPayload: withPayload, flick: false)
+        for step in 1...steps {
+            usleep(16_000)
+            send(phase: changed, progress: Double(step) / Double(steps),
+                 step: 1 / Double(steps), right: right, withPayload: withPayload,
+                 flick: false)
+        }
+        send(phase: ended, progress: 1, step: hair,
+             right: right, withPayload: withPayload, flick: false)
     }
 
-    private static func make(phase: Int64, right: Bool, withPayload: Bool) -> CGEvent? {
+    private static func send(phase: Int64, progress: Double, step: Double,
+                             right: Bool, withPayload: Bool, flick: Bool) {
+        guard let event = make(phase: phase, progress: progress, step: step,
+                               right: right, withPayload: withPayload, flick: flick)
+        else { return }
+        event.post(tap: .cgSessionEventTap)
+        guard let companion = CGEvent(source: nil) else { return }
+        setInt(companion, eventType, gesture)
+        companion.post(tap: .cgSessionEventTap)
+    }
+
+    /// `progress` is how far the swipe has travelled, 0 to 1; `step` is how far
+    /// it moved since the last event. The two encodings carry one or the other,
+    /// and disagree about which sign means right.
+    private static func make(phase: Int64, progress: Double, step: Double,
+                             right: Bool, withPayload: Bool, flick: Bool) -> CGEvent? {
         guard let event = CGEvent(source: nil) else { return nil }
         setInt(event, eventType, dockControl)
         setInt(event, hidType, dockSwipeType)
         setInt(event, phaseField, phase)
         setInt(event, swipeMotion, horizontal)
+        let sign: Double = right ? 1 : -1
 
         guard withPayload else {
-            // The packed bits of the smallest float there is. Empirically this
-            // is what makes the switch immediate instead of a slow drag.
-            let nudge: Float = right ? .leastNonzeroMagnitude : -.leastNonzeroMagnitude
-            setInt(event, scrollFlagBits, Int64(Int32(bitPattern: nudge.bitPattern)))
+            // This field carries the packed bits of a float: the distance
+            // travelled since the last event. The smallest float there is
+            // stands in for "barely moved", which only switches at all because
+            // of the fling velocity below.
+            let delta = Float(sign * step)
+            setInt(event, scrollFlagBits, Int64(Int32(bitPattern: delta.bitPattern)))
             setDouble(event, scrollY, 0)
             setDouble(event, zoomDeltaX, Double(Float.leastNonzeroMagnitude))
             if phase == ended {
-                setDouble(event, velocityX, right ? 400 : -400)
+                // A flick needs a fling to carry it the whole way. A drag that
+                // already covered the distance only needs enough to settle in
+                // the direction it was going.
+                setDouble(event, velocityX, sign * (flick ? 400 : 90))
                 setDouble(event, velocityY, 0)
             }
             return event
         }
 
-        let progress = right ? -1.0 : 1.0
-        let velocity = phase == ended ? (right ? -9999.0 : 9999.0) : 0
-        setDouble(event, swipeProgress, progress)
+        let carried = -sign * progress
+        let velocity = phase == ended ? -sign * (flick ? 9999.0 : 300.0) : 0
+        setDouble(event, swipeProgress, carried)
         setInt(event, phaseAlias, phase)
         setDouble(event, zoomDeltaY, 3)
         setDouble(event, sourceProcessAlias, Double(mach_absolute_time()))
         setDouble(event, positionX, 0.1)
         if phase == ended { setDouble(event, velocityX, velocity) }
-        return withIOHIDPayload(event, phase: phase, progress: progress,
+        return withIOHIDPayload(event, phase: phase, progress: carried,
                                 positionX: 0.1, velocityX: velocity)
     }
 

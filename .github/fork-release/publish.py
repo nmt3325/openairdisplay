@@ -106,6 +106,12 @@ def environment():
                          'APP_VERSION ' + env['APP_VERSION']
                          + ' (expected ' + expected_tag + ' or '
                          + expected_tag + '.<revision>)')
+    # Fork revisions go out as pre-releases, so the main release — what
+    # releases/latest and the fixed download URLs resolve to — only moves when
+    # a build is deliberately published as one.
+    env['PRERELEASE'] = ('false'
+                         if os.environ.get('PRERELEASE', '').strip().lower() == 'false'
+                         else 'true')
     return env
 
 
@@ -470,7 +476,7 @@ def stable_ios_name():
 
     SideStore compares the bundle ID inside the IPA with the file name stem
     when a download URL is installed directly, so the same archive is also
-    published as <bundle id>.ipa under the fixed releases/latest URL.
+    published under that name alongside the versioned one on every release.
     """
     return CONFIG['bundleIDs']['ios'] + '.ipa'
 
@@ -719,18 +725,24 @@ def publish_release(env, uploads, notes, dry_run):
         return
     exists = subprocess.run(['gh', 'release', 'view', tag, '--repo', REPO],
                             text=True, capture_output=True).returncode == 0
+    # A pre-release is listed apart from the main release and is skipped by
+    # releases/latest, which keeps a test build from becoming the download
+    # everyone lands on.
+    channel = (['--prerelease'] if env['PRERELEASE'] == 'true'
+               else ['--prerelease=false', '--latest'])
     if exists:
         at_tag = gh(['api', 'repos/' + REPO + '/commits/' + tag, '--jq', '.sha'])
         if at_tag != env['SOURCE_SHA']:
             raise SystemExit('Tag ' + tag + ' already points at ' + at_tag)
         gh(['release', 'upload', tag, '--repo', REPO, '--clobber'] + files)
         gh(['release', 'edit', tag, '--repo', REPO, '--title', release_title(env),
-            '--notes-file', str(notes), '--latest'])
+            '--notes-file', str(notes)] + channel)
     else:
         gh(['release', 'create', tag, '--repo', REPO, '--target', env['SOURCE_SHA'],
-            '--title', release_title(env), '--notes-file', str(notes),
-            '--latest'] + files)
-    note('published ' + tag)
+            '--title', release_title(env), '--notes-file', str(notes)]
+           + channel + files)
+    note('published ' + tag
+         + (' as a pre-release' if env['PRERELEASE'] == 'true' else ' as the main release'))
 
 
 def verify_published_assets(env, uploads, workspace):
@@ -749,8 +761,16 @@ def verify_published_assets(env, uploads, workspace):
     extra = sorted(path.name for path in directory.iterdir()
                    if path.name not in {item.name for item in uploads})
     check(not extra, tag + ': unexpected assets on the release: ' + repr(extra))
-    latest = gh(['api', 'repos/' + REPO + '/releases/latest', '--jq', '.tag_name'])
-    check(latest == tag, 'releases/latest points at ' + latest + ', not ' + tag)
+    if env['PRERELEASE'] == 'true':
+        flagged = gh(['api', 'repos/' + REPO + '/releases/tags/' + tag,
+                      '--jq', '.prerelease'])
+        check(flagged == 'true', tag + ' is not flagged as a pre-release')
+        newest = gh(['api', 'repos/' + REPO + '/releases', '--jq',
+                     '[.[] | select(.prerelease)][0].tag_name'])
+        check(newest == tag, 'the newest pre-release is ' + newest + ', not ' + tag)
+    else:
+        latest = gh(['api', 'repos/' + REPO + '/releases/latest', '--jq', '.tag_name'])
+        check(latest == tag, 'releases/latest points at ' + latest + ', not ' + tag)
     note(tag + ': every published asset matches the verified build')
 
 

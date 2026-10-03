@@ -24,6 +24,10 @@ on:
         description: Publish release and update feeds after verification
         default: true
         type: boolean
+      prerelease:
+        description: Publish as a pre-release, kept apart from the main release
+        default: true
+        type: boolean
 
 permissions:
   contents: read
@@ -130,4 +134,7 @@ jobs:
           APP_BUILD_NUMBER: ${{ github.run_number }}
           SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
           RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
+          # Tag pushes carry no inputs and are fork revisions, so they take the
+          # pre-release default; only a deliberate run can move the main release.
+          PRERELEASE: ${{ inputs.prerelease == false && 'false' || 'true' }}
         run: python3 .github/fork-release/publish.py release-assets

@@ -48,8 +48,10 @@ number stays put and a revision is appended: `v1.25.0-air.2`. The app version
 is still the upstream one — Sparkle tells builds apart by build number.
 The apps have their own bundle identifiers, their own Sparkle feeds and their
 own signing certificate, so they install next to OpenDisplay rather than
-replacing it. Downloads are on the
-[releases page](https://github.com/nmt3325/openairdisplay/releases/latest).
+replacing it. Fork revisions are published as pre-releases, listed apart from
+the main release that `releases/latest` and the fixed download URLs resolve
+to. Downloads are on the
+[releases page](https://github.com/nmt3325/openairdisplay/releases).
 
 ## Why OpenDisplay exists
 
@@ -486,6 +488,10 @@ everything else works the same on every supported version.
   https://github.com/nmt3325/openairdisplay/releases/latest/download/io.github.nmt3325.openairdisplay.ios.ipa
   ```
 
+  That URL resolves to the main release. Pre-release revisions are only
+  offered through the source above, or as the same asset on their own release
+  page.
+
 ## Quick start (from source)
 
 ### Prerequisites
@@ -558,8 +564,10 @@ force-quit and reopen the app.
 Swiping sideways with three fingers switches the Space (desktop) shown on
 that screen. macOS has no public per-display Spaces API, so the Mac app
 replays what a trackpad sends, with the pointer parked on the virtual display
-so the system applies it there: a synthetic dock-swipe gesture first, and the
-⌃← / ⌃→ Mission Control shortcut as a fallback. Whichever one works is
+so the system applies it there: a synthetic dock-swipe gesture, sent as a
+gradual drag so the desktops slide the way they do under a real swipe, with an
+instant form of it and the ⌃← / ⌃→ Mission Control shortcut as fallbacks.
+Whichever one works is
 remembered, along with the direction convention, which differs between macOS
 versions. One thing still has to be true on the Mac:
 
