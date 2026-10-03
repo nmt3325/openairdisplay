@@ -109,6 +109,7 @@ def environment():
     # Fork revisions go out as pre-releases, so the main release — what
     # releases/latest and the fixed download URLs resolve to — only moves when
     # a build is deliberately published as one.
+    # An unset value counts as a pre-release, which is what a tag push sends.
     env['PRERELEASE'] = ('false'
                          if os.environ.get('PRERELEASE', '').strip().lower() == 'false'
                          else 'true')
