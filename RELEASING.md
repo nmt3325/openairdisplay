@@ -22,6 +22,11 @@ build is uploaded to TestFlight on every release, but publishing it to the App
 Store is a separate manual decision. A TestFlight upload does not update App
 Store users.
 
+Fork releases are published as pre-releases: listed apart from the main
+release and skipped by `releases/latest`, so the fixed download URLs keep
+pointing at the main release. To publish one as the main release instead,
+run the fork release workflow with *Publish as a pre-release* turned off.
+
 ## Release impact record
 
 Copy this section into the release PR and fill it in before creating the tag.
