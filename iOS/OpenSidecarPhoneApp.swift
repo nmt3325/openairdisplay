@@ -720,7 +720,17 @@ struct VideoLayerView: UIViewRepresentable {
                                          action: #selector(VideoView.didMultiFingerPan(_:)))
         pan.minimumNumberOfTouches = 2
         pan.maximumNumberOfTouches = 3
+        pan.delegate = view
         view.addGestureRecognizer(pan)
+
+        // Three fingers pinching: in for Launchpad, out to leave it again. It
+        // shares its fingers with the pan above, so both recognizers have to be
+        // allowed to see them — otherwise whichever recognized first would take
+        // the gesture away from the other.
+        let pinch = UIPinchGestureRecognizer(
+            target: view, action: #selector(VideoView.didPinch(_:)))
+        pinch.delegate = view
+        view.addGestureRecognizer(pinch)
 
         // Local cursor echo: position updates ride the ~2ms control path
         // instead of the ~30ms video path, so the pointer feels native.
@@ -746,7 +756,7 @@ struct VideoLayerView: UIViewRepresentable {
         uiView.setNeedsLayout()
     }
 
-    final class VideoView: UIView {
+    final class VideoView: UIView, UIGestureRecognizerDelegate {
         weak var receiver: StreamReceiver?
         var metalRenderer: MetalVideoRenderer?
         let inputEngine = InputCaptureEngine()
@@ -952,7 +962,8 @@ struct VideoLayerView: UIViewRepresentable {
         private var spaceDragTravel: CGFloat { max(150, bounds.width * 0.55) }
         /// Movement (points) before a three-finger drag is judged sideways.
         private let spaceAxisSlop: CGFloat = 8
-        /// Upward travel (points) that opens Mission Control on the Mac.
+        /// Travel (points) up or down that opens Mission Control on the Mac, or
+        /// leaves it.
         private let missionControlThreshold: CGFloat = 40
         /// Whether this gesture is being reported to the Mac as it moves,
         /// whether it turned out to be an up-and-down drag, and whether it is
@@ -979,22 +990,22 @@ struct VideoLayerView: UIViewRepresentable {
 
         /// Three fingers moving. Sideways reports where they are on every move,
         /// so the Mac's desktops follow them: moving slowly slides slowly and
-        /// pulling back slides back. Up is Mission Control instead.
+        /// pulling back slides back. Up and down are Mission Control instead.
         private func updateSpacePan(_ recognizer: UIPanGestureRecognizer) {
             guard !spaceDragRejected else { return }
             let dx = spacePanTravel(recognizer)
             let dy = recognizer.translation(in: self).y - spacePanOrigin.y
             if spaceDragVertical {
-                openMissionControlIfSwipedUp(dy)
+                missionControlIfSwipedVertically(dy)
                 return
             }
             if !spaceDragFollowing {
                 guard max(abs(dx), abs(dy)) > spaceAxisSlop else { return }
-                // Sideways and clearly so: a three-finger drag going up is
-                // Mission Control, and one going down is nothing at all.
+                // Sideways and clearly so: a three-finger drag going up opens
+                // Mission Control, and one going down leaves it.
                 guard abs(dx) > abs(dy) * 1.5 else {
                     spaceDragVertical = true
-                    openMissionControlIfSwipedUp(dy)
+                    missionControlIfSwipedVertically(dy)
                     return
                 }
                 spaceDragFollowing = true
@@ -1004,11 +1015,13 @@ struct VideoLayerView: UIViewRepresentable {
             receiver?.sendSpaceDrag(phase: "changed", progress: spaceProgress(dx))
         }
 
-        /// Once the fingers are far enough up, and once per gesture.
-        private func openMissionControlIfSwipedUp(_ dy: CGFloat) {
-            guard dy < -missionControlThreshold else { return }
-            Log.info("three-finger swipe up: Mission Control")
-            receiver?.sendMissionControl()
+        /// Once the fingers are far enough up or down, and once per gesture.
+        private func missionControlIfSwipedVertically(_ dy: CGFloat) {
+            guard abs(dy) > missionControlThreshold else { return }
+            let show = dy < 0
+            Log.info(show ? "three-finger swipe up: Mission Control"
+                          : "three-finger swipe down: leaving Mission Control")
+            receiver?.sendMissionControl(show: show)
             spaceDragRejected = true
         }
 
@@ -1055,6 +1068,58 @@ struct VideoLayerView: UIViewRepresentable {
         private func spaceSpeed(_ recognizer: UIPanGestureRecognizer) -> Double {
             Double(-recognizer.velocity(in: self).x / spaceDragTravel)
         }
+
+        // MARK: Three-finger pinch
+
+        /// How far three fingers have to close, or open, before the pinch counts
+        /// — as a share of how far apart they started.
+        private let launchpadPinchIn: CGFloat = 0.75
+        private let launchpadPinchOut: CGFloat = 1.3
+        /// Launchpad is opened or left once per pinch, however far it carries on.
+        private var pinchHasFired = false
+
+        /// Three fingers pinching: in opens Launchpad, out leaves it. Two
+        /// fingers are a scroll, not a pinch, so they are left alone here.
+        @objc func didPinch(_ recognizer: UIPinchGestureRecognizer) {
+            switch recognizer.state {
+            case .began:
+                pinchHasFired = false
+            case .changed:
+                guard !pinchHasFired, recognizer.numberOfTouches >= 3 else { return }
+                let show: Bool
+                if recognizer.scale <= launchpadPinchIn {
+                    show = true
+                } else if recognizer.scale >= launchpadPinchOut {
+                    show = false
+                } else {
+                    return
+                }
+                pinchHasFired = true
+                // These fingers are pinching, whatever the pan recognizer made
+                // of them on the way, so no desktop goes anywhere.
+                cancelSpaceDrag()
+                Log.info(show ? "three-finger pinch in: Launchpad"
+                              : "three-finger pinch out: leaving Launchpad")
+                receiver?.sendLaunchpad(show: show)
+            default:
+                pinchHasFired = false
+            }
+        }
+
+        /// Take back a space drag the pan recognizer had already started, so the
+        /// desktops slide home instead of following a pinch.
+        private func cancelSpaceDrag() {
+            spaceDragRejected = true
+            guard spaceDragFollowing else { return }
+            spaceDragFollowing = false
+            receiver?.sendSpaceDrag(phase: "cancelled", progress: 0)
+        }
+
+        /// The three-finger pan and the pinch share the same fingers, and both
+        /// have to be allowed to watch them.
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer,
+                               shouldRecognizeSimultaneouslyWith other: UIGestureRecognizer)
+            -> Bool { true }
 
         // MARK: Multi-finger pan
 

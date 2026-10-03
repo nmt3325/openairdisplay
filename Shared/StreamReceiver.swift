@@ -1191,9 +1191,17 @@ final class StreamReceiver: ObservableObject {
                      "velocity": velocity])
     }
 
-    /// Three fingers swiped up: open Mission Control on the Mac.
-    func sendMissionControl() {
-        sendControl(["type": "missionControl"])
+    /// Three fingers swiped up to open Mission Control on the Mac, or down to
+    /// leave it.
+    func sendMissionControl(show: Bool) {
+        sendControl(["type": "missionControl",
+                     "action": show ? "show" : "hide"])
+    }
+
+    /// Three fingers pinched in to open Launchpad on the Mac, or spread back
+    /// out to leave it.
+    func sendLaunchpad(show: Bool) {
+        sendControl(["type": "launchpad", "action": show ? "show" : "hide"])
     }
 
     /// Apple Pencil stroke/hover. azimuth and altitude are radians.
