@@ -952,9 +952,13 @@ struct VideoLayerView: UIViewRepresentable {
         private var spaceDragTravel: CGFloat { max(150, bounds.width * 0.55) }
         /// Movement (points) before a three-finger drag is judged sideways.
         private let spaceAxisSlop: CGFloat = 8
-        /// Whether this gesture is being reported to the Mac as it moves, and
-        /// whether it was ruled out as a vertical drag.
+        /// Upward travel (points) that opens Mission Control on the Mac.
+        private let missionControlThreshold: CGFloat = 40
+        /// Whether this gesture is being reported to the Mac as it moves,
+        /// whether it turned out to be an up-and-down drag, and whether it is
+        /// done with.
         private var spaceDragFollowing = false
+        private var spaceDragVertical = false
         private var spaceDragRejected = false
 
         /// iPadOS claims three-finger swipes for the undo/redo editing HUD,
@@ -967,25 +971,30 @@ struct VideoLayerView: UIViewRepresentable {
             twoFingerActive = false
             threeFingerActive = true
             spaceDragFollowing = false
+            spaceDragVertical = false
             spaceDragRejected = false
             spacePanOrigin = recognizer.translation(in: self)
             stopMomentum()
         }
 
-        /// Three fingers moving sideways: report where they are on every move,
-        /// so the Mac's desktops follow them. Moving slowly slides slowly,
-        /// pulling back slides back, and letting go short of the commit
-        /// distance snaps back without switching.
+        /// Three fingers moving. Sideways reports where they are on every move,
+        /// so the Mac's desktops follow them: moving slowly slides slowly and
+        /// pulling back slides back. Up is Mission Control instead.
         private func updateSpacePan(_ recognizer: UIPanGestureRecognizer) {
             guard !spaceDragRejected else { return }
             let dx = spacePanTravel(recognizer)
+            let dy = recognizer.translation(in: self).y - spacePanOrigin.y
+            if spaceDragVertical {
+                openMissionControlIfSwipedUp(dy)
+                return
+            }
             if !spaceDragFollowing {
-                let dy = recognizer.translation(in: self).y - spacePanOrigin.y
                 guard max(abs(dx), abs(dy)) > spaceAxisSlop else { return }
-                // Sideways and clearly so: a three-finger drag heading down is
-                // not a space switch.
+                // Sideways and clearly so: a three-finger drag going up is
+                // Mission Control, and one going down is nothing at all.
                 guard abs(dx) > abs(dy) * 1.5 else {
-                    spaceDragRejected = true
+                    spaceDragVertical = true
+                    openMissionControlIfSwipedUp(dy)
                     return
                 }
                 spaceDragFollowing = true
@@ -995,12 +1004,23 @@ struct VideoLayerView: UIViewRepresentable {
             receiver?.sendSpaceDrag(phase: "changed", progress: spaceProgress(dx))
         }
 
+        /// Once the fingers are far enough up, and once per gesture.
+        private func openMissionControlIfSwipedUp(_ dy: CGFloat) {
+            guard dy < -missionControlThreshold else { return }
+            Log.info("three-finger swipe up: Mission Control")
+            receiver?.sendMissionControl()
+            spaceDragRejected = true
+        }
+
         private func endSpacePan(_ recognizer: UIPanGestureRecognizer,
                                  cancelled: Bool) {
             let dx = spacePanTravel(recognizer)
             if spaceDragFollowing {
+                // The speed the fingers left with decides a swipe that never
+                // covered half a desktop, so the release carries it.
                 receiver?.sendSpaceDrag(phase: cancelled ? "cancelled" : "ended",
-                                        progress: spaceProgress(dx))
+                                        progress: spaceProgress(dx),
+                                        velocity: spaceSpeed(recognizer))
             }
             // A Mac too old to follow the gesture knows one message for the
             // whole swipe, so it gets one when the fingers lift.
@@ -1012,6 +1032,7 @@ struct VideoLayerView: UIViewRepresentable {
             }
             threeFingerActive = false
             spaceDragFollowing = false
+            spaceDragVertical = false
             spaceDragRejected = false
         }
 
@@ -1025,6 +1046,14 @@ struct VideoLayerView: UIViewRepresentable {
         /// content left brings in the space to the right.
         private func spaceProgress(_ dx: CGFloat) -> Double {
             max(-1.0, min(1.0, Double(-dx / spaceDragTravel)))
+        }
+
+        /// How fast the fingers are moving sideways, in desktops a second and
+        /// signed like `spaceProgress`. A release above the Mac's flick speed
+        /// switches however short the swipe was; below it, a swipe that never
+        /// reached half a desktop slides back.
+        private func spaceSpeed(_ recognizer: UIPanGestureRecognizer) -> Double {
+            Double(-recognizer.velocity(in: self).x / spaceDragTravel)
         }
 
         // MARK: Multi-finger pan

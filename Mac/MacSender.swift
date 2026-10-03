@@ -2403,8 +2403,13 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             if let phase = obj["phase"] as? String {
                 if phase == "began" { sendJSONFrame("{\"type\":\"spaceDragOK\"}") }
                 inputInjector?.handleSpaceDrag(
-                    phase: phase, progress: obj["progress"] as? Double ?? 0)
+                    phase: phase, progress: obj["progress"] as? Double ?? 0,
+                    velocity: obj["velocity"] as? Double ?? 0)
             }
+        case "missionControl":
+            // Three fingers swiped up on the phone. Mission Control covers
+            // every display at once, so there is nothing to scope here.
+            inputInjector?.handleMissionControl()
         case "pencil":
             if let phase = obj["phase"] as? String,
                let x = obj["x"] as? Double,
