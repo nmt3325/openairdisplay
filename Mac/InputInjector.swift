@@ -58,6 +58,7 @@ final class InputInjector {
     private var dragPosted: Double = 0
     private var dragPostedAt: CFAbsoluteTime = 0
     private var dragLastStep: Double = 0
+    private var dragSpeed: Double = 0
     private var dragSpaces = 2
     private var dragStart: (count: Int, current: Int)?
     // Bumped per gesture, so a verification that outlived its swipe knows not
@@ -161,6 +162,9 @@ final class InputInjector {
     private static let preferredMethodKey = "spaceSwitchMethod"
     private static let flippedDirectionKey = "spaceSwitchDirectionFlipped"
     private static let dragLandedKey = "spaceDragLanded"
+    /// Release speed, in spaces a second, that commits a swipe however short it
+    /// was: the difference between letting go of a drag and flicking it.
+    private static let flickSpeed = 1.5
     private lazy var preferredMethod = SpaceSwitchMethod(
         rawValue: UserDefaults.standard.string(forKey: Self.preferredMethodKey) ?? "")
     private lazy var directionIsFlipped =
@@ -241,20 +245,42 @@ final class InputInjector {
     /// commit distance snaps back without switching. macOS decides whether a
     /// release commits, exactly as it does for a trackpad — we only report the
     /// gesture it would have seen.
-    func handleSpaceDrag(phase: String, progress: Double) {
+    func handleSpaceDrag(phase: String, progress: Double, velocity: Double) {
         let requested = max(-1.0, min(1.0, progress))
         let travel = directionIsFlipped ? -requested : requested
+        let speed = directionIsFlipped ? -velocity : velocity
         switch phase {
         case "began":
             beginDrag()
         case "changed":
             updateDrag(travel: travel)
         case "ended", "cancelled":
-            endDrag(travel: travel, requestedRight: requested > 0,
+            // A flick can be over before it has covered any distance, so where
+            // it was heading comes from the speed when the travel says nothing.
+            let wantsRight = abs(requested) >= 0.02 ? requested > 0 : velocity > 0
+            endDrag(travel: travel, speed: speed, requestedRight: wantsRight,
                     cancelled: phase == "cancelled")
         default:
             return
         }
+    }
+
+    /// Three fingers swiped up. Mission Control is one view of every display at
+    /// once rather than something that happens on one of them, so this needs no
+    /// pointer warp and no per-display scoping.
+    func handleMissionControl() {
+        if MissionControl.show() {
+            Log.info("mission control: opened through the Dock")
+            return
+        }
+        // Mission Control answers to Control plus Up out of the box, so this
+        // needs nothing assigned on most systems.
+        postKey(virtualKey: 0x3B, keyDown: true, flags: .maskControl)
+        postKey(virtualKey: 126, keyDown: true, flags: .maskControl)  // kVK_UpArrow
+        postKey(virtualKey: 126, keyDown: false, flags: .maskControl)
+        postKey(virtualKey: 0x3B, keyDown: false, flags: [])
+        Log.info("mission control: the Dock entry point is unavailable, so posted"
+                 + " Control+Up instead")
     }
 
     private func beginDrag() {
@@ -279,6 +305,7 @@ final class InputInjector {
         dragPosted = 0
         dragPostedAt = 0
         dragLastStep = 0
+        dragSpeed = 0
         stateLock.lock()
         dragGeneration &+= 1
         stateLock.unlock()
@@ -297,6 +324,31 @@ final class InputInjector {
         }
     }
 
+    /// Takes a released gesture the rest of the way rather than leaving the
+    /// outcome to be inferred from the exit speed: a committed swipe slides out
+    /// to a whole space and ends there, and one that is staying put slides back
+    /// to where it started and is cancelled. Same gesture, same result, every
+    /// time, and the slide keeps the animation the fingers were drawing.
+    private func settleDrag(from travel: Double, committed: Bool, right: Bool) {
+        let target = committed ? (right ? 1.0 : -1.0) : 0.0
+        let spaces = dragSpaces
+        let payload = dragMethod.carriesPayload
+        spaceDragQueue.async {
+            let steps = 4
+            let increment = (target - travel) / Double(steps)
+            for step in 1...steps {
+                DockSwipe.drag(phase: .changed,
+                               travel: travel + increment * Double(step),
+                               lastStep: increment, spaces: spaces,
+                               withPayload: payload)
+                usleep(12_000)
+            }
+            DockSwipe.drag(phase: committed ? .ended : .cancelled, travel: target,
+                           lastStep: committed ? increment : 0, spaces: spaces,
+                           withPayload: payload)
+        }
+    }
+
     private func updateDrag(travel: Double) {
         guard dragTravel != nil else { return }
         dragTravel = travel
@@ -308,22 +360,28 @@ final class InputInjector {
         let step = travel - dragPosted
         let minimumGap = dragMethod.carriesPayload ? 0.010 : 0.004
         guard now - dragPostedAt >= minimumGap, abs(step) >= 0.0005 else { return }
+        if dragPostedAt > 0 { dragSpeed = step / (now - dragPostedAt) }
         dragPosted = travel
         dragPostedAt = now
         dragLastStep = step
         postDrag(.changed, travel: travel, lastStep: step)
     }
 
-    /// The fingers lifted, or the gesture gave up. The release carries the
-    /// speed they left with, which is all macOS needs to decide the switch:
-    /// past half a space, or fast enough to be a flick, it completes, and
-    /// otherwise it slides back on its own.
-    private func endDrag(travel: Double, requestedRight: Bool, cancelled: Bool) {
+    /// The fingers lifted, or the gesture gave up. Two things commit the
+    /// switch: letting go past half a desktop, or still moving faster than a
+    /// flick, however short the swipe was. Anything else slides back.
+    private func endDrag(travel: Double, speed: Double, requestedRight: Bool,
+                         cancelled: Bool) {
         guard dragTravel != nil else { return }
-        let step = travel - dragPosted
-        let lastStep = abs(step) >= 0.0005 ? step : dragLastStep
-        postDrag(cancelled ? .cancelled : .ended, travel: travel,
-                 lastStep: cancelled ? 0 : lastStep)
+        // A pause before the lift is a deliberate stop, so only a fresh sample
+        // counts as the speed the fingers left with. A phone that reports none
+        // leaves the stream itself to be measured.
+        let stale = CFAbsoluteTimeGetCurrent() - dragPostedAt > 0.1
+        let released = speed != 0 ? speed : (stale ? 0 : dragSpeed)
+        let flicked = abs(released) >= Self.flickSpeed
+        let committed = !cancelled && (abs(travel) >= 0.5 || flicked)
+        let right = abs(travel) >= 0.02 ? travel > 0 : released > 0
+        settleDrag(from: travel, committed: committed, right: right)
         let start = dragStart
         let method = dragMethod
         dragTravel = nil
@@ -334,32 +392,41 @@ final class InputInjector {
         lastSpaceSwitch = CFAbsoluteTimeGetCurrent()
         let generation = dragGeneration
         stateLock.unlock()
-        guard !cancelled, let start else { return }
+        let distance = String(format: "%.2f", abs(travel))
+        let pace = String(format: "%.1f", abs(released))
+        guard committed else {
+            if !cancelled {
+                Log.info("space drag let go at \(distance) of a space at \(pace)"
+                         + " spaces a second, so it slid back without switching")
+            }
+            return
+        }
+        guard let start else { return }
         // macOS does not wrap around, so a swipe off either end of the row did
         // nothing because there was nothing to do.
-        let right = travel > 0
         if (right && start.current == start.count) || (!right && start.current == 1) {
             Log.info("space drag: already at the \(right ? "last" : "first") space on"
                      + " this display")
             return
         }
+        Log.info("space drag committed at \(distance) of a space at \(pace) spaces a"
+                 + " second\(flicked && abs(travel) < 0.5 ? ", as a flick" : "")")
         spaceVerifyQueue.async { [weak self] in
             self?.confirmDrag(from: start, requestedRight: requestedRight,
-                              released: travel, method: method, generation: generation)
+                              method: method, generation: generation)
         }
     }
 
-    /// What a released drag actually did. A system that has followed one before
-    /// is not suddenly ignoring them, so the one-shot chain only steps in while
-    /// nothing has ever landed: replaying a swipe that merely looked like it
-    /// failed is what makes one gesture switch twice.
+    /// What a committed drag actually did. A system that has followed one
+    /// before is not suddenly ignoring them, so the one-shot chain only steps
+    /// in while nothing has ever landed: replaying a swipe that merely looked
+    /// like it failed is what makes one gesture switch twice.
     private func confirmDrag(from start: (count: Int, current: Int),
-                             requestedRight: Bool, released: Double,
-                             method: SpaceSwitchMethod, generation: UInt64) {
-        let travelled = String(format: "%.2f", abs(released))
+                             requestedRight: Bool, method: SpaceSwitchMethod,
+                             generation: UInt64) {
         if let after = settledLayout(differingFrom: start) {
-            Log.info("space drag landed via \(method.summary) at \(travelled) of a"
-                     + " space: space \(after.current) of \(after.count)")
+            Log.info("space drag landed via \(method.summary): space"
+                     + " \(after.current) of \(after.count)")
             remember(method)
             rememberDragFollows()
             calibrate(requestedRight: requestedRight, before: start, after: after)
@@ -369,9 +436,9 @@ final class InputInjector {
         let followedBefore = dragHasLanded
         let superseded = dragGeneration != generation
         stateLock.unlock()
-        guard abs(released) >= 0.5, !followedBefore, !superseded else {
-            Log.info("space drag stayed put at \(travelled) of a space: still space"
-                     + " \(start.current) of \(start.count)")
+        guard !followedBefore, !superseded else {
+            Log.info("space drag stayed put: still space \(start.current) of"
+                     + " \(start.count)")
             return
         }
         Log.info("space drag had no effect: replaying it as a single swipe")
@@ -694,6 +761,38 @@ final class InputInjector {
 /// only *changing* a space from outside Dock that requires a scripting
 /// addition — so the SkyLight symbols are resolved lazily and every failure
 /// degrades to "unknown" rather than to a crash on the next macOS.
+/// Mission Control, through the notification the Dock itself listens for: the
+/// same path F3 and a trackpad swipe up end up taking, and unlike a gesture it
+/// needs nothing bound in Keyboard Shortcuts.
+private enum MissionControl {
+    private typealias SendNotificationFn = @convention(c) (CFString, Int32) -> Void
+
+    private static let handles = [
+        dlopen("/System/Library/Frameworks/ApplicationServices.framework/Frameworks"
+               + "/HIServices.framework/HIServices", RTLD_LAZY),
+        dlopen("/System/Library/PrivateFrameworks/SkyLight.framework/SkyLight",
+               RTLD_LAZY),
+    ]
+
+    private static let sendNotification: SendNotificationFn? = {
+        for handle in handles {
+            guard let handle, let address = dlsym(handle, "CoreDockSendNotification")
+            else { continue }
+            return unsafeBitCast(address, to: SendNotificationFn.self)
+        }
+        return nil
+    }()
+
+    /// True once the request has gone out, which is as much as this entry point
+    /// reports: it returns nothing, and whether Mission Control is open is not
+    /// readable from outside the Dock.
+    static func show() -> Bool {
+        guard let sendNotification else { return false }
+        sendNotification("com.apple.expose.awake" as CFString, 0)
+        return true
+    }
+}
+
 private enum Spaces {
     private typealias MainConnectionFn = @convention(c) () -> Int32
     private typealias CopyDisplaySpacesFn = @convention(c) (Int32) -> Unmanaged<CFArray>?

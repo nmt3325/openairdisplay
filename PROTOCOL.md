@@ -255,7 +255,8 @@ Coordinates use the conventions of section 7.
 | `touch` | pv 1 | `phase`, `x`, `y`, `t`? | Finger input |
 | `scroll` | pv 1 | `dx`, `dy` | Two-finger scroll |
 | `spaceSwitch` | pv 3 (additive) | `direction` | Three-finger swipe: switch this display's space |
-| `spaceDrag` | pv 3 (additive) | `phase`, `progress` | The same swipe, reported as it moves |
+| `spaceDrag` | pv 3 (additive) | `phase`, `progress`, `velocity` | The same swipe, reported as it moves |
+| `missionControl` | pv 3 (additive) | none | Three-finger swipe up: open Mission Control |
 | `pencil` | pv 3 | `phase`, `x`, `y`, `pressure`, `azimuth`, `altitude`, `rotation`, `t`? | Stylus input |
 | `proximity` | pv 3 | `entering`, `x`, `y` | Stylus hover enter/leave |
 | `kf` | pv 1 | none | Request an IDR (section 5.3) |
@@ -348,15 +349,24 @@ the swipe has travelled, in spaces, where 1 is a whole desktop and positive
 means towards the space on the right, in the same natural-swipe terms as
 `spaceSwitch`. It reports one three-finger swipe as it happens, so a sender
 can slide the desktops with the fingers, follow them back when they reverse,
-and treat a release short of the commit distance as no switch at all. A
-receiver SHOULD clamp the magnitude to 1, since a swipe already a whole desktop
-along has nowhere further to slide. A sender MAY ignore the type and act on
-`spaceSwitch` alone.
+and decide the switch when they lift. A releasing phase also carries `velocity`
+(number, optional, default 0): how fast the fingers were moving as they lifted,
+in spaces per second, signed like `progress`. A sender SHOULD commit the switch
+when a release is past half a space or above its own flick speed, and otherwise
+slide back without switching. A receiver SHOULD clamp the magnitude of
+`progress` to 1, since a swipe already a whole desktop along has nowhere
+further to slide. A sender MAY ignore the type and act on `spaceSwitch` alone.
 
 A receiver that sends both MUST NOT let one swipe switch twice. The reference
 receiver always streams `spaceDrag` and sends `spaceSwitch` on release only
 while no `spaceDragOK` (section 6.2) has arrived on this connection, so a
 sender that follows the gesture never sees the one-shot message.
+
+**`missionControl`** (pv 3, additive) carries no arguments: three fingers
+swiped up, which opens Mission Control. Mission Control shows every display at
+once rather than belonging to one of them, so the message says nothing about
+which display the gesture happened on. Senders older than this message ignore
+the unknown type, so the gesture simply does nothing.
 
 **`pencil`** (pv 3) carries `phase` (string): `"down"`, `"move"`, `"up"`,
 or `"hover"`; `x`, `y`: normalized position; `pressure` (number): 0 to 1;
@@ -832,6 +842,7 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 3 (additive) | `hello.panel` (6.7); `pixelsWide/High/scale` deprecated, removed at the next bump |
 | 3 (additive) | `spaceSwitch` (6.1); unknown to older senders, which ignore it |
 | 3 (additive) | `spaceDrag` and its `spaceDragOK` acknowledgement (6.1, 6.2); receivers fall back to `spaceSwitch` for senders without it |
+| 3 (additive) | `missionControl` (6.1); unknown to older senders, which ignore it |
 | 4 (reserved) | Typed frame header replacing the section 4 demux heuristic (two-phase migration) |
 
 ---

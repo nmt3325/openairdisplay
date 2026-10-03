@@ -1182,9 +1182,18 @@ final class StreamReceiver: ObservableObject {
     /// The same swipe, followed as it moves: `progress` is how far it has
     /// travelled in spaces (1 is a whole desktop), positive towards the space
     /// on the right, and `phase` is "began", "changed", "ended" or
-    /// "cancelled". Macs that predate this message ignore the unknown type.
-    func sendSpaceDrag(phase: String, progress: Double) {
-        sendControl(["type": "spaceDrag", "phase": phase, "progress": progress])
+    /// "cancelled". A release also carries `velocity`, the speed the fingers
+    /// left with in spaces a second, which commits a swipe too short to count
+    /// on distance alone. Macs that predate this message ignore the unknown
+    /// type.
+    func sendSpaceDrag(phase: String, progress: Double, velocity: Double = 0) {
+        sendControl(["type": "spaceDrag", "phase": phase, "progress": progress,
+                     "velocity": velocity])
+    }
+
+    /// Three fingers swiped up: open Mission Control on the Mac.
+    func sendMissionControl() {
+        sendControl(["type": "missionControl"])
     }
 
     /// Apple Pencil stroke/hover. azimuth and altitude are radians.
