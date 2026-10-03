@@ -354,7 +354,10 @@ and decide the switch when they lift. A releasing phase also carries `velocity`
 (number, optional, default 0): how fast the fingers were moving as they lifted,
 in spaces per second, signed like `progress`. A sender SHOULD commit the switch
 when a release is past half a space or above its own flick speed, and otherwise
-slide back without switching. A receiver SHOULD clamp the magnitude of
+slide back without switching. A sender SHOULD animate the rest of that slide
+over a frame or two rather than jumping to the end, and SHOULD NOT pass the
+lift speed on for the platform to carry further, which overshoots the new
+desktop and bounces back. A receiver SHOULD clamp the magnitude of
 `progress` to 1, since a swipe already a whole desktop along has nowhere
 further to slide. A sender MAY ignore the type and act on `spaceSwitch` alone.
 
