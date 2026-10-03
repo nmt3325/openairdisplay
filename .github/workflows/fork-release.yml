@@ -134,7 +134,10 @@ jobs:
           APP_BUILD_NUMBER: ${{ github.run_number }}
           SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
           RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
-          # Tag pushes carry no inputs and are fork revisions, so they take the
-          # pre-release default; only a deliberate run can move the main release.
-          PRERELEASE: ${{ inputs.prerelease == false && 'false' || 'true' }}
+          # Blank on a tag push, which carries no inputs: publish.py reads
+          # anything but an explicit false as a pre-release, so only a
+          # deliberate run with the box cleared can move the main release.
+          # Comparing the input against false here cannot work, because an
+          # expression casts an absent input to false as well.
+          PRERELEASE: ${{ inputs.prerelease }}
         run: python3 .github/fork-release/publish.py release-assets
