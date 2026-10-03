@@ -20,6 +20,16 @@
       "versions": [
         {
           "version": "1.25.0",
+          "buildVersion": "18",
+          "date": "2026-10-03T15:11:01Z",
+          "localizedDescription": "OpenAirDisplay 1.25.0 (build 18). Release notes: https://github.com/nmt3325/openairdisplay/releases/tag/v1.25.0-air.14",
+          "downloadURL": "https://github.com/nmt3325/openairdisplay/releases/download/v1.25.0-air.14/OpenAirDisplay-iOS-unsigned-1.25.0-f1050e3.ipa",
+          "size": 508002,
+          "sha256": "9d1316cd1d0c116b592b0cf0b542065d5f11a32da0d994f0890cf68af36f68b2",
+          "minOSVersion": "15.0"
+        },
+        {
+          "version": "1.25.0",
           "buildVersion": "17",
           "date": "2026-10-03T14:53:37Z",
           "localizedDescription": "OpenAirDisplay 1.25.0 (build 17). Release notes: https://github.com/nmt3325/openairdisplay/releases/tag/v1.25.0-air.13",
@@ -106,16 +116,6 @@
           "downloadURL": "https://github.com/nmt3325/openairdisplay/releases/download/v1.25.0-air.5/OpenAirDisplay-iOS-unsigned-1.25.0-b69ba80.ipa",
           "size": 504727,
           "sha256": "39ef08c1de3250ef8fedb1c129584c4ce9f8d6956e4543049b76bcb9910c11c4",
-          "minOSVersion": "15.0"
-        },
-        {
-          "version": "1.25.0",
-          "buildVersion": "8",
-          "date": "2026-10-02T17:44:04Z",
-          "localizedDescription": "OpenAirDisplay 1.25.0 (build 8). Release notes: https://github.com/nmt3325/openairdisplay/releases/tag/v1.25.0-air.4",
-          "downloadURL": "https://github.com/nmt3325/openairdisplay/releases/download/v1.25.0-air.4/OpenAirDisplay-iOS-unsigned-1.25.0-2631236.ipa",
-          "size": 504727,
-          "sha256": "57fa95a3da3ede1737ec5aebccf46b8251763611c50fde6c41f960ec978ffea0",
           "minOSVersion": "15.0"
         }
       ]
