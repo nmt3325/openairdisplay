@@ -48,6 +48,9 @@ final class InputInjector {
     // Confirming a switch means reading the layout back after the animation,
     // which has no business happening on the control channel's thread.
     private let spaceVerifyQueue = DispatchQueue(label: "space-switch-verify")
+    // Guards the cooldown clock, which the control channel and the switch
+    // queue both touch.
+    private let stateLock = NSLock()
 
     // Pencil-only synthetic click counting — tablet events don't get click
     // state from the Window Server, so we mirror macOS double-click prefs here.
@@ -133,91 +136,168 @@ final class InputInjector {
         event.post(tap: .cghidEventTap)
     }
 
-    /// Mission Control space switch for *this* display, from the phone's
-    /// three-finger swipe. direction is "left" or "right".
+    // Which injection method is known to work on this machine, and whether it
+    // reports swipe direction inverted. Both differ by macOS version and are
+    // cheaper to discover at runtime than to predict.
+    private static let preferredMethodKey = "spaceSwitchMethod"
+    private static let flippedDirectionKey = "spaceSwitchDirectionFlipped"
+    private lazy var preferredMethod = SpaceSwitchMethod(
+        rawValue: UserDefaults.standard.string(forKey: Self.preferredMethodKey) ?? "")
+    private lazy var directionIsFlipped =
+        UserDefaults.standard.bool(forKey: Self.flippedDirectionKey)
+
+    /// Switch the Space (virtual desktop) shown on *this* display, from the
+    /// phone's three-finger swipe. direction is "left" or "right".
     ///
     /// There is no public per-display Spaces API, and the private one
     /// (SLSManagedDisplaySetCurrentSpace) only takes effect from inside Dock —
     /// that is what tiling window managers ship a scripting addition for, and
     /// it needs SIP partially disabled, which a display driver has no business
-    /// requiring. So we post what the trackpad shortcut posts, Control+Arrow,
-    /// after parking the cursor on our display: with "Displays have separate
-    /// Spaces" on, the shortcut acts on the display the pointer is over, not
-    /// on whichever window happens to be focused.
+    /// requiring.
+    ///
+    /// What is left is replaying what a trackpad sends, with the cursor parked
+    /// on our display so the system applies it here. Two mechanisms exist and
+    /// which one works depends on the macOS version and on settings we do not
+    /// control, so try them in turn and keep whichever lands:
+    ///
+    /// 1. A synthetic dock swipe (private CGS event type 30) — the gesture the
+    ///    trackpad itself produces, so it depends on no shortcut being
+    ///    assigned. macOS 27 validates these against a serialized IOHID queue
+    ///    payload, hence the two variants.
+    /// 2. Control+Arrow, which is merely a Mission Control *shortcut*: when it
+    ///    is unassigned or taken by another app nothing happens at all, which
+    ///    is exactly what the first round of field logs showed.
     func handleSpaceSwitch(direction: String) {
-        let keyCode: CGKeyCode
+        let right: Bool
         switch direction {
-        case "left": keyCode = 123    // kVK_LeftArrow
-        case "right": keyCode = 124   // kVK_RightArrow
+        case "left": right = false
+        case "right": right = true
         default: return
         }
         // The switch animation runs ~0.4s and queued repeats stack into a
         // sprint across every space, so swallow anything that close behind.
+        // Attempts are serialized on one queue, which also keeps a slow
+        // fallback chain from piling up behind a burst of swipes.
         let now = CFAbsoluteTimeGetCurrent()
-        guard now - lastSpaceSwitch > spaceSwitchCooldown else { return }
-        lastSpaceSwitch = now
+        stateLock.lock()
+        let tooSoon = now - lastSpaceSwitch <= spaceSwitchCooldown
+        if !tooSoon { lastSpaceSwitch = now }
+        stateLock.unlock()
+        guard !tooSoon else { return }
 
-        // During a touch gesture the cursor already sits on this display, but
-        // a swipe can also be the first thing a session sees. The Window
-        // Server needs a moment to register a warp before the keys land.
+        spaceVerifyQueue.async { [weak self] in
+            self?.switchSpace(requestedRight: right, direction: direction)
+        }
+    }
+
+    private func switchSpace(requestedRight: Bool, direction: String) {
+        // During a touch gesture the cursor already sits on this display, but a
+        // swipe can also be the first thing a session sees. The Window Server
+        // needs a moment to register a warp before anything lands.
         let bounds = CGDisplayBounds(displayID)
         if !bounds.contains(currentCursor()) {
             CGWarpMouseCursorPosition(CGPoint(x: bounds.midX, y: bounds.midY))
             usleep(15_000)
         }
-
-        // A display with a single space has nothing to switch to, which looks
-        // exactly like a broken gesture. Say so instead of posting into a void.
-        let before = Spaces.layout(of: displayID)
-        if let before {
-            Log.info("space switch \(direction): space \(before.current) of \(before.count)")
-            if before.count < 2 {
-                Log.info("space switch ignored: this display has one space. Add one in"
-                         + " Mission Control (hover the top of this screen, then +).")
-                return
-            }
-        } else {
-            Log.info("space switch \(direction): space layout unavailable")
-        }
-
-        // With "Displays have separate Spaces" off, a single space spans every
-        // screen and this display has no space of its own: the shortcut moves
-        // all of them together. Say so, because the gesture then looks like it
-        // is affecting the wrong screen rather than like a setting.
         if SpacesSettings.spansDisplays {
             Log.info("space switch: \"Displays have separate Spaces\" is off, so one space"
                      + " spans every screen (System Settings > Desktop & Dock; the change"
                      + " needs a log out).")
         }
 
+        let right = requestedRight != directionIsFlipped
+        guard let before = Spaces.layout(of: displayID) else {
+            // Without a layout there is nothing to verify against, so post the
+            // most likely method and leave it at that.
+            Log.info("space switch \(direction): space layout unavailable")
+            if let method = methodOrder.first { post(method, right: right) }
+            return
+        }
+        Log.info("space switch \(direction): space \(before.current) of \(before.count)")
+        // A display with a single space has nothing to switch to, which looks
+        // exactly like a broken gesture. Say so instead of posting into a void.
+        if before.count < 2 {
+            Log.info("space switch ignored: this display has one space. Add one in"
+                     + " Mission Control (hover the top of this screen, then +).")
+            return
+        }
+        // macOS does not wrap around, so at either end there is nothing to do
+        // and a silent no-op would read as a failure.
+        if (right && before.current == before.count) || (!right && before.current == 1) {
+            Log.info("space switch \(direction): already at the"
+                     + " \(right ? "last" : "first") space on this display")
+            return
+        }
+
+        for method in methodOrder {
+            post(method, right: right)
+            // Believe the layout only after the switch has had time to finish.
+            usleep(500_000)
+            guard let after = Spaces.layout(of: displayID),
+                  after.current != before.current else { continue }
+            Log.info("space switch landed via \(method.summary): space \(after.current)"
+                     + " of \(after.count)")
+            remember(method)
+            calibrate(requestedRight: requestedRight, before: before, after: after)
+            return
+        }
+        Log.info("space switch had no effect: a dock swipe and the keyboard shortcut were"
+                 + " both ignored. \(Hotkeys.spaceSwitchDiagnosis())")
+    }
+
+    /// Methods to try, best bet first.
+    private var methodOrder: [SpaceSwitchMethod] {
+        // macOS 27 rejects a dock swipe that carries no IOHID payload, and
+        // earlier versions do not expect one, so lead with whichever matches
+        // this system and keep the other as a fallback.
+        var order: [SpaceSwitchMethod] =
+            ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 27
+                ? [.dockSwipeWithPayload, .dockSwipe, .missionControlShortcut]
+                : [.dockSwipe, .dockSwipeWithPayload, .missionControlShortcut]
+        if let preferredMethod, let index = order.firstIndex(of: preferredMethod) {
+            order.remove(at: index)
+            order.insert(preferredMethod, at: 0)
+        }
+        return order
+    }
+
+    private func post(_ method: SpaceSwitchMethod, right: Bool) {
+        switch method {
+        case .dockSwipe: DockSwipe.post(right: right, withPayload: false)
+        case .dockSwipeWithPayload: DockSwipe.post(right: right, withPayload: true)
+        case .missionControlShortcut: postSpaceShortcut(right: right)
+        }
+    }
+
+    private func postSpaceShortcut(right: Bool) {
         // A real keyboard brackets the arrow with the modifier's own key
         // events. The Window Server's hotkey layer reads that live modifier
         // state, and an arrow carrying nothing but `flags` is the pattern that
         // Cmd-Tab and the Spaces shortcuts are known to ignore.
+        let keyCode: CGKeyCode = right ? 124 : 123   // kVK_Right/LeftArrow
         postKey(virtualKey: 0x3B, keyDown: true, flags: .maskControl)   // kVK_Control
         postKey(virtualKey: keyCode, keyDown: true, flags: .maskControl)
         postKey(virtualKey: keyCode, keyDown: false, flags: .maskControl)
         postKey(virtualKey: 0x3B, keyDown: false, flags: [])
-
-        // Posting the shortcut is not proof that anything honored it: the
-        // binding can be off or taken by another app, and the Window Server can
-        // decline synthetic keys outright. Read the layout back once the
-        // animation has had time to run, so one try says which of those it was
-        // instead of leaving "nothing happened" to be guessed at.
-        spaceVerifyQueue.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-            self?.confirmSpaceSwitch(from: before)
-        }
     }
 
-    /// Logs whether the posted shortcut actually moved this display's space.
-    private func confirmSpaceSwitch(from before: (count: Int, current: Int)?) {
-        guard let before, let after = Spaces.layout(of: displayID) else { return }
-        guard after.current == before.current else {
-            Log.info("space switch landed: space \(after.current) of \(after.count)")
-            return
-        }
-        Log.info("space switch had no effect: still space \(after.current) of"
-                 + " \(after.count). \(Hotkeys.spaceSwitchDiagnosis())")
+    private func remember(_ method: SpaceSwitchMethod) {
+        guard preferredMethod != method else { return }
+        preferredMethod = method
+        UserDefaults.standard.set(method.rawValue, forKey: Self.preferredMethodKey)
+    }
+
+    /// A swipe that moved the wrong way is a sign convention we guessed wrong,
+    /// not a user error: flip it and remember, rather than asking anyone to
+    /// live with inverted gestures.
+    private func calibrate(requestedRight: Bool,
+                           before: (count: Int, current: Int),
+                           after: (count: Int, current: Int)) {
+        guard (after.current > before.current) != requestedRight else { return }
+        directionIsFlipped.toggle()
+        UserDefaults.standard.set(directionIsFlipped, forKey: Self.flippedDirectionKey)
+        Log.info("space switch: this system reports swipe direction inverted, flipping it"
+                 + " from here on")
     }
 
     private func postKey(virtualKey: CGKeyCode, keyDown: Bool, flags: CGEventFlags) {
@@ -498,5 +578,203 @@ private enum Hotkeys {
                 + " it on in System Settings > Keyboard > Keyboard Shortcuts > Mission Control."
             : "Nothing is bound to Control plus an arrow key: assign \"Move left/right a"
                 + " space\" in System Settings > Keyboard > Keyboard Shortcuts > Mission Control."
+    }
+}
+
+/// How a space switch can be delivered, in the order of how much of the system
+/// has to cooperate. Raw values are persisted, so leave them alone.
+private enum SpaceSwitchMethod: String {
+    case dockSwipe = "dock-swipe"
+    case dockSwipeWithPayload = "dock-swipe-payload"
+    case missionControlShortcut = "control-arrow"
+
+    var summary: String {
+        switch self {
+        case .dockSwipe: return "a dock swipe"
+        case .dockSwipeWithPayload: return "a dock swipe with an IOHID payload"
+        case .missionControlShortcut: return "the Control+Arrow shortcut"
+        }
+    }
+}
+
+/// A synthetic trackpad dock swipe: the gesture a trackpad itself sends to the
+/// Dock, which is what makes it independent of whatever the user has bound in
+/// Keyboard Shortcuts. The field tags are the private CGS gesture tags that
+/// yabai, FasterSwiper and InstantSpaceSwitcher all converged on.
+///
+/// The fields are set through dlsym'd CoreGraphics entry points rather than
+/// `CGEvent.setIntegerValueField`, because these tag numbers have no
+/// `CGEventField` case to name them and the Swift enum would have to be
+/// force-unwrapped from a raw value.
+private enum DockSwipe {
+    private static let eventType: UInt32 = 55         // kCGSEventTypeField
+    private static let hidType: UInt32 = 110          // kCGEventGestureHIDType
+    private static let scrollY: UInt32 = 119
+    private static let swipeMotion: UInt32 = 123      // horizontal vs vertical
+    private static let swipeProgress: UInt32 = 124
+    private static let positionX: UInt32 = 125
+    private static let velocityX: UInt32 = 129
+    private static let velocityY: UInt32 = 130
+    private static let phaseField: UInt32 = 132
+    private static let phaseAlias: UInt32 = 134
+    private static let scrollFlagBits: UInt32 = 135
+    private static let zoomDeltaY: UInt32 = 138
+    private static let zoomDeltaX: UInt32 = 139       // required, reason unknown
+    private static let sourceProcessAlias: UInt32 = 169
+    private static let rawIOHIDPayload: UInt16 = 4205
+
+    private static let dockControl: Int64 = 30        // kCGSEventDockControl
+    private static let gesture: Int64 = 29            // kCGSEventGesture
+    private static let dockSwipeType: Int64 = 23      // kIOHIDEventTypeDockSwipe
+    private static let horizontal: Int64 = 1          // kCGGestureMotionHorizontal
+    private static let began: Int64 = 1
+    private static let changed: Int64 = 2
+    private static let ended: Int64 = 4
+
+    /// Replays a whole swipe: began, changed, ended. Each dock-control event
+    /// travels with the companion gesture event a trackpad would pair it with.
+    static func post(right: Bool, withPayload: Bool) {
+        for phase in [began, changed, ended] {
+            guard let event = make(phase: phase, right: right, withPayload: withPayload)
+            else { continue }
+            event.post(tap: .cgSessionEventTap)
+            if let companion = CGEvent(source: nil) {
+                setInt(companion, eventType, gesture)
+                companion.post(tap: .cgSessionEventTap)
+            }
+        }
+    }
+
+    private static func make(phase: Int64, right: Bool, withPayload: Bool) -> CGEvent? {
+        guard let event = CGEvent(source: nil) else { return nil }
+        setInt(event, eventType, dockControl)
+        setInt(event, hidType, dockSwipeType)
+        setInt(event, phaseField, phase)
+        setInt(event, swipeMotion, horizontal)
+
+        guard withPayload else {
+            // The packed bits of the smallest float there is. Empirically this
+            // is what makes the switch immediate instead of a slow drag.
+            let nudge: Float = right ? .leastNonzeroMagnitude : -.leastNonzeroMagnitude
+            setInt(event, scrollFlagBits, Int64(Int32(bitPattern: nudge.bitPattern)))
+            setDouble(event, scrollY, 0)
+            setDouble(event, zoomDeltaX, Double(Float.leastNonzeroMagnitude))
+            if phase == ended {
+                setDouble(event, velocityX, right ? 400 : -400)
+                setDouble(event, velocityY, 0)
+            }
+            return event
+        }
+
+        let progress = right ? -1.0 : 1.0
+        let velocity = phase == ended ? (right ? -9999.0 : 9999.0) : 0
+        setDouble(event, swipeProgress, progress)
+        setInt(event, phaseAlias, phase)
+        setDouble(event, zoomDeltaY, 3)
+        setDouble(event, sourceProcessAlias, Double(mach_absolute_time()))
+        setDouble(event, positionX, 0.1)
+        if phase == ended { setDouble(event, velocityX, velocity) }
+        return withIOHIDPayload(event, phase: phase, progress: progress,
+                                positionX: 0.1, velocityX: velocity)
+    }
+
+    /// macOS 27 checks a synthetic dock swipe against the serialized IOHID
+    /// queue element the real gesture would have carried, in field 4205. That
+    /// field cannot be set through any entry point, so append it to the event's
+    /// own serialization and rebuild the event from the result.
+    private static func withIOHIDPayload(_ event: CGEvent, phase: Int64, progress: Double,
+                                         positionX: Double, velocityX: Double) -> CGEvent? {
+        guard let cfData = event.data else { return nil }
+        let serialized = cfData as Data
+        // Only version 2 blobs carry the trailing tag-length-value section.
+        guard serialized.count >= 4, serialized[0] == 0, serialized[1] == 0,
+              serialized[2] == 0, serialized[3] == 2 else { return nil }
+        let payload = iohidPayload(phase: phase, progress: progress, positionX: positionX,
+                                   velocityX: velocityX, timestamp: event.timestamp)
+        var blob = serialized
+        blob.append(UInt8(truncatingIfNeeded: payload.count >> 8))
+        blob.append(UInt8(truncatingIfNeeded: payload.count))
+        blob.append(UInt8(truncatingIfNeeded: rawIOHIDPayload >> 8))
+        blob.append(UInt8(truncatingIfNeeded: rawIOHIDPayload))
+        blob.append(payload)
+        return CGEvent(withDataAllocator: nil, data: blob as CFData)
+    }
+
+    /// One IOHID queue element: a fluid-touch gesture event, plus a velocity
+    /// event on the phase that ends the swipe.
+    private static func iohidPayload(phase: Int64, progress: Double, positionX: Double,
+                                     velocityX: Double, timestamp: UInt64) -> Data {
+        let withVelocity = velocityX != 0 || phase == ended
+        var payload = Data()
+        // Queue element header: timestamp, sender, options, attribute length,
+        // event count.
+        append(&payload, timestamp == 0 ? mach_absolute_time() : timestamp)
+        append(&payload, UInt64(0))
+        append(&payload, UInt32(0))
+        append(&payload, UInt32(0))
+        append(&payload, UInt32(withVelocity ? 2 : 1))
+        // Fluid touch gesture: a 16-byte event base, then the gesture body.
+        append(&payload, UInt32(40))
+        append(&payload, UInt32(23))                  // kIOHIDEventTypeFluidTouchGesture
+        append(&payload, UInt32(truncatingIfNeeded: phase) << 24)
+        append(&payload, UInt32(0))                   // depth and reserved bytes
+        append(&payload, fixed1616(positionX))
+        append(&payload, fixed1616(0))
+        append(&payload, fixed1616(0))
+        append(&payload, UInt32(0))                   // swipe mask
+        append(&payload, UInt16(truncatingIfNeeded: horizontal))
+        append(&payload, UInt16(3))                   // dock primary flavor
+        append(&payload, fixed1616(progress))
+        if withVelocity {
+            append(&payload, UInt32(28))
+            append(&payload, UInt32(9))               // kIOHIDEventTypeVelocity
+            append(&payload, UInt32(0))
+            append(&payload, UInt32(1))               // depth 1, reserved zero
+            append(&payload, fixed1616(velocityX))
+            append(&payload, fixed1616(0))
+            append(&payload, fixed1616(0))
+        }
+        return payload
+    }
+
+    private static func append<T: FixedWidthInteger>(_ data: inout Data, _ value: T) {
+        withUnsafeBytes(of: value.littleEndian) { data.append(contentsOf: $0) }
+    }
+
+    /// IOHID carries these as 16.16 fixed point, and rounds a nonzero value to
+    /// the smallest representable one rather than to nothing.
+    private static func fixed1616(_ value: Double) -> Int32 {
+        let scaled = (value * 65536).rounded(.towardZero)
+        guard scaled.isFinite else { return 0 }
+        let clamped = min(max(scaled, -2_147_483_648), 2_147_483_647)
+        let fixed = Int32(clamped)
+        if fixed == 0, value != 0 { return value > 0 ? 1 : -1 }
+        return fixed
+    }
+
+    private typealias SetIntegerField =
+        @convention(c) (UnsafeMutableRawPointer?, UInt32, Int64) -> Void
+    private typealias SetDoubleField =
+        @convention(c) (UnsafeMutableRawPointer?, UInt32, Double) -> Void
+
+    private static let handle = dlopen(
+        "/System/Library/Frameworks/CoreGraphics.framework/CoreGraphics", RTLD_LAZY)
+
+    private static func symbol<T>(_ name: String) -> T? {
+        guard let handle, let address = dlsym(handle, name) else { return nil }
+        return unsafeBitCast(address, to: T.self)
+    }
+
+    private static let setIntegerValueField: SetIntegerField? =
+        symbol("CGEventSetIntegerValueField")
+    private static let setDoubleValueField: SetDoubleField? =
+        symbol("CGEventSetDoubleValueField")
+
+    private static func setInt(_ event: CGEvent, _ field: UInt32, _ value: Int64) {
+        setIntegerValueField?(Unmanaged.passUnretained(event).toOpaque(), field, value)
+    }
+
+    private static func setDouble(_ event: CGEvent, _ field: UInt32, _ value: Double) {
+        setDoubleValueField?(Unmanaged.passUnretained(event).toOpaque(), field, value)
     }
 }
