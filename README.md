@@ -562,12 +562,14 @@ force-quit and reopen the app.
 ### Three-finger swipe between desktops
 
 Swiping sideways with three fingers switches the Space (desktop) shown on
-that screen. macOS has no public per-display Spaces API, so the Mac app
+that screen, and the desktops follow the fingers: the phone reports how far the
+swipe has travelled as it moves, so sliding slowly slides slowly, pulling back
+slides back, and letting go short of half a desktop of travel snaps back
+without switching. macOS has no public per-display Spaces API, so the Mac app
 replays what a trackpad sends, with the pointer parked on the virtual display
-so the system applies it there: a synthetic dock-swipe gesture, sent as a
-gradual drag so the desktops slide the way they do under a real swipe, with an
-instant form of it and the ⌃← / ⌃→ Mission Control shortcut as fallbacks.
-Whichever one works is
+so the system applies it there: a synthetic dock-swipe gesture, with a canned
+version of it, an instant form, and the ⌃← / ⌃→ Mission Control shortcut as
+fallbacks for systems that ignore the one before. Whichever one works is
 remembered, along with the direction convention, which differs between macOS
 versions. One thing still has to be true on the Mac:
 
@@ -575,19 +577,19 @@ versions. One thing still has to be true on the Mac:
   one, and one desktop has nowhere to switch to. Add one in Mission Control:
   move the pointer onto the phone's screen, open Mission Control, then click
   **+** in the Spaces bar at the top of *that* screen. The Mac app logs
-  `space switch ignored: this display has one space` when this is the problem.
+  `space drag ignored: this display has one space` when this is the problem.
 The ⌃← / ⌃→ fallback additionally needs Mission Control's *Move left/right a
 space* shortcut to be assigned (System Settings > Keyboard > Keyboard
 Shortcuts > Mission Control). A dock swipe needs no shortcut at all, which is
 why it is tried first.
 
 Every swipe says what it did in the Mac log, so none of this has to be guessed
-at. First `space switch right: space 1 of 3` when the gesture arrives, then
-either `space switch landed via a dock swipe: space 2 of 3` or `space switch
-had no effect` once every method has been tried, with the reason the keyboard
-fallback was refused. With *Displays have separate Spaces* off, the
-log also notes that one space spans every screen, which is what makes a
-per-display switch impossible.
+at. A followed swipe logs `space drag: space 1 of 3` when the fingers start
+moving, then one of `space drag landed via a dock swipe: space 2 of 3`, `space
+drag let go short of the commit distance`, or `space drag had no effect`, which
+replays the swipe through the fallbacks and logs that attempt in turn. With
+*Displays have separate Spaces* off, the log also notes that one space spans
+every screen, which is what makes a per-display switch impossible.
 
 ### Getting the logs for a bug report
 

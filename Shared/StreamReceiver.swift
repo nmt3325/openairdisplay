@@ -925,6 +925,9 @@ final class StreamReceiver: ObservableObject {
             macInputP50 = obj["inp50"] as? Double ?? macInputP50
             macInputP95 = obj["inp95"] as? Double ?? macInputP95
             macCapFps = obj["capFps"] as? Int ?? macCapFps
+        case "spaceDragOK":
+            // Only a Mac that follows a three-finger swipe answers this.
+            macFollowsSpaceDrag = true
         case "cursor":
             applyCursor(obj)
         case "cursorImg":
@@ -1170,6 +1173,18 @@ final class StreamReceiver: ObservableObject {
     /// "left" or "right"; older Macs ignore the unknown type.
     func sendSpaceSwitch(direction: String) {
         sendControl(["type": "spaceSwitch", "direction": direction])
+    }
+
+    /// Set once the Mac answers a `spaceDrag`, which only a Mac that follows
+    /// the gesture does. Until then the phone also sends the one-shot message.
+    private(set) var macFollowsSpaceDrag = false
+
+    /// The same swipe, followed as it moves: `progress` is how far it has
+    /// travelled in spaces (1 is a whole desktop), positive towards the space
+    /// on the right, and `phase` is "began", "changed", "ended" or
+    /// "cancelled". Macs that predate this message ignore the unknown type.
+    func sendSpaceDrag(phase: String, progress: Double) {
+        sendControl(["type": "spaceDrag", "phase": phase, "progress": progress])
     }
 
     /// Apple Pencil stroke/hover. azimuth and altitude are radians.

@@ -2395,6 +2395,16 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             if let direction = obj["direction"] as? String {
                 inputInjector?.handleSpaceSwitch(direction: direction)
             }
+        case "spaceDrag":
+            // The same swipe, followed as it moves: the phone reports how far
+            // its fingers have gone so the desktops slide with them. Answering
+            // the first message is how the phone learns it can stop sending the
+            // one-shot `spaceSwitch` as well.
+            if let phase = obj["phase"] as? String {
+                if phase == "began" { sendJSONFrame("{\"type\":\"spaceDragOK\"}") }
+                inputInjector?.handleSpaceDrag(
+                    phase: phase, progress: obj["progress"] as? Double ?? 0)
+            }
         case "pencil":
             if let phase = obj["phase"] as? String,
                let x = obj["x"] as? Double,
