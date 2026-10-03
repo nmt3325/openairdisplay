@@ -348,9 +348,10 @@ the swipe has travelled, in spaces, where 1 is a whole desktop and positive
 means towards the space on the right, in the same natural-swipe terms as
 `spaceSwitch`. It reports one three-finger swipe as it happens, so a sender
 can slide the desktops with the fingers, follow them back when they reverse,
-and treat a release short of the commit distance as no switch at all. Magnitude
-MAY exceed 1 where the gesture overshoots. A sender MAY ignore the type and
-act on `spaceSwitch` alone.
+and treat a release short of the commit distance as no switch at all. A
+receiver SHOULD clamp the magnitude to 1, since a swipe already a whole desktop
+along has nowhere further to slide. A sender MAY ignore the type and act on
+`spaceSwitch` alone.
 
 A receiver that sends both MUST NOT let one swipe switch twice. The reference
 receiver always streams `spaceDrag` and sends `spaceSwitch` on release only
