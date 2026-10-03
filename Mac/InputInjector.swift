@@ -57,7 +57,19 @@ final class InputInjector {
     private var dragMethod: SpaceSwitchMethod = .dockSwipe
     private var dragPosted: Double = 0
     private var dragPostedAt: CFAbsoluteTime = 0
+    private var dragLastStep: Double = 0
+    private var dragSpaces = 2
     private var dragStart: (count: Int, current: Int)?
+    // Bumped per gesture, so a verification that outlived its swipe knows not
+    // to act on what the next one did.
+    private var dragGeneration: UInt64 = 0
+    // Whether a followed swipe has ever landed on this system, which is what
+    // decides if the one-shot chain is still worth trying.
+    private lazy var dragHasLanded = UserDefaults.standard.bool(forKey: Self.dragLandedKey)
+    // Drag events go out in order and off the control channel's thread: the
+    // Dock reads a swipe as a sequence, and a reordered one reads as two half
+    // gestures.
+    private let spaceDragQueue = DispatchQueue(label: "space-drag")
 
     // Pencil-only synthetic click counting — tablet events don't get click
     // state from the Window Server, so we mirror macOS double-click prefs here.
@@ -148,6 +160,7 @@ final class InputInjector {
     // cheaper to discover at runtime than to predict.
     private static let preferredMethodKey = "spaceSwitchMethod"
     private static let flippedDirectionKey = "spaceSwitchDirectionFlipped"
+    private static let dragLandedKey = "spaceDragLanded"
     private lazy var preferredMethod = SpaceSwitchMethod(
         rawValue: UserDefaults.standard.string(forKey: Self.preferredMethodKey) ?? "")
     private lazy var directionIsFlipped =
@@ -229,7 +242,7 @@ final class InputInjector {
     /// release commits, exactly as it does for a trackpad — we only report the
     /// gesture it would have seen.
     func handleSpaceDrag(phase: String, progress: Double) {
-        let requested = max(-1.5, min(1.5, progress))
+        let requested = max(-1.0, min(1.0, progress))
         let travel = directionIsFlipped ? -requested : requested
         switch phase {
         case "began":
@@ -261,14 +274,27 @@ final class InputInjector {
         }
         dragStart = start
         dragMethod = method
+        dragSpaces = start?.count ?? 2
         dragTravel = 0
         dragPosted = 0
         dragPostedAt = 0
+        dragLastStep = 0
+        stateLock.lock()
+        dragGeneration &+= 1
+        stateLock.unlock()
         if let start {
             Log.info("space drag: space \(start.current) of \(start.count)")
         }
-        DockSwipe.drag(phase: .began, travel: 0, step: 0, release: 0,
-                       withPayload: method.carriesPayload)
+        postDrag(.began, travel: 0, lastStep: 0)
+    }
+
+    private func postDrag(_ phase: DockSwipe.Phase, travel: Double, lastStep: Double) {
+        let spaces = dragSpaces
+        let payload = dragMethod.carriesPayload
+        spaceDragQueue.async {
+            DockSwipe.drag(phase: phase, travel: travel, lastStep: lastStep,
+                           spaces: spaces, withPayload: payload)
+        }
     }
 
     private func updateDrag(travel: Double) {
@@ -276,29 +302,28 @@ final class InputInjector {
         dragTravel = travel
         // The phone reports every touch move, which can be twice a display
         // refresh, and the payload encoding rebuilds a serialized event each
-        // time. One event per frame is as much as the Dock can draw.
+        // time. A frame's worth of movement is as much as the Dock can draw,
+        // and anything finer only costs the gesture latency.
         let now = CFAbsoluteTimeGetCurrent()
         let step = travel - dragPosted
-        guard now - dragPostedAt >= 0.008, abs(step) >= 0.001 else { return }
+        let minimumGap = dragMethod.carriesPayload ? 0.010 : 0.004
+        guard now - dragPostedAt >= minimumGap, abs(step) >= 0.0005 else { return }
         dragPosted = travel
         dragPostedAt = now
-        DockSwipe.drag(phase: .changed, travel: travel, step: step, release: 0,
-                       withPayload: dragMethod.carriesPayload)
+        dragLastStep = step
+        postDrag(.changed, travel: travel, lastStep: step)
     }
 
+    /// The fingers lifted, or the gesture gave up. The release carries the
+    /// speed they left with, which is all macOS needs to decide the switch:
+    /// past half a space, or fast enough to be a flick, it completes, and
+    /// otherwise it slides back on its own.
     private func endDrag(travel: Double, requestedRight: Bool, cancelled: Bool) {
         guard dragTravel != nil else { return }
-        let committed = !cancelled && abs(travel) >= 0.5
-        // Past the commit distance the release carries the hand-off speed a
-        // trackpad would report, so the Dock takes the switch the rest of the
-        // way; short of it the release carries nothing and the desktops settle
-        // back where they started.
-        let release = committed
-            ? (travel > 0 ? 1.0 : -1.0) * (dragMethod.carriesPayload ? 300.0 : 90.0)
-            : 0
-        DockSwipe.drag(phase: cancelled ? .cancelled : .ended, travel: travel,
-                       step: travel - dragPosted, release: release,
-                       withPayload: dragMethod.carriesPayload)
+        let step = travel - dragPosted
+        let lastStep = abs(step) >= 0.0005 ? step : dragLastStep
+        postDrag(cancelled ? .cancelled : .ended, travel: travel,
+                 lastStep: cancelled ? 0 : lastStep)
         let start = dragStart
         let method = dragMethod
         dragTravel = nil
@@ -307,35 +332,60 @@ final class InputInjector {
         // `spaceSwitch` for the same swipe cannot switch a second time.
         stateLock.lock()
         lastSpaceSwitch = CFAbsoluteTimeGetCurrent()
+        let generation = dragGeneration
         stateLock.unlock()
         guard !cancelled, let start else { return }
+        // macOS does not wrap around, so a swipe off either end of the row did
+        // nothing because there was nothing to do.
+        let right = travel > 0
+        if (right && start.current == start.count) || (!right && start.current == 1) {
+            Log.info("space drag: already at the \(right ? "last" : "first") space on"
+                     + " this display")
+            return
+        }
         spaceVerifyQueue.async { [weak self] in
             self?.confirmDrag(from: start, requestedRight: requestedRight,
-                              committed: committed, method: method)
+                              released: travel, method: method, generation: generation)
         }
     }
 
-    /// A release that passed the commit distance and changed nothing means this
-    /// system ignores a finger-driven swipe, so hand the switch to the one-shot
-    /// chain, which also records what does work here.
+    /// What a released drag actually did. A system that has followed one before
+    /// is not suddenly ignoring them, so the one-shot chain only steps in while
+    /// nothing has ever landed: replaying a swipe that merely looked like it
+    /// failed is what makes one gesture switch twice.
     private func confirmDrag(from start: (count: Int, current: Int),
-                             requestedRight: Bool, committed: Bool,
-                             method: SpaceSwitchMethod) {
+                             requestedRight: Bool, released: Double,
+                             method: SpaceSwitchMethod, generation: UInt64) {
+        let travelled = String(format: "%.2f", abs(released))
         if let after = settledLayout(differingFrom: start) {
-            Log.info("space drag landed via \(method.summary): space"
-                     + " \(after.current) of \(after.count)")
+            Log.info("space drag landed via \(method.summary) at \(travelled) of a"
+                     + " space: space \(after.current) of \(after.count)")
             remember(method)
+            rememberDragFollows()
             calibrate(requestedRight: requestedRight, before: start, after: after)
             return
         }
-        guard committed else {
-            Log.info("space drag let go short of the commit distance: still space"
+        stateLock.lock()
+        let followedBefore = dragHasLanded
+        let superseded = dragGeneration != generation
+        stateLock.unlock()
+        guard abs(released) >= 0.5, !followedBefore, !superseded else {
+            Log.info("space drag stayed put at \(travelled) of a space: still space"
                      + " \(start.current) of \(start.count)")
             return
         }
         Log.info("space drag had no effect: replaying it as a single swipe")
         switchSpace(requestedRight: requestedRight,
                     direction: requestedRight ? "right" : "left")
+    }
+
+    private func rememberDragFollows() {
+        stateLock.lock()
+        let known = dragHasLanded
+        dragHasLanded = true
+        stateLock.unlock()
+        guard !known else { return }
+        UserDefaults.standard.set(true, forKey: Self.dragLandedKey)
     }
 
     private func switchSpace(requestedRight: Bool, direction: String) {
@@ -358,7 +408,7 @@ final class InputInjector {
             // Without a layout there is nothing to verify against, so post the
             // most likely method and leave it at that.
             Log.info("space switch \(direction): space layout unavailable")
-            if let method = methodOrder.first { post(method, right: right) }
+            if let method = methodOrder.first { post(method, right: right, spaces: 2) }
             return
         }
         Log.info("space switch \(direction): space \(before.current) of \(before.count)")
@@ -378,7 +428,7 @@ final class InputInjector {
         }
 
         for method in methodOrder {
-            post(method, right: right)
+            post(method, right: right, spaces: before.count)
             guard let after = settledLayout(differingFrom: before) else { continue }
             Log.info("space switch landed via \(method.summary): space \(after.current)"
                      + " of \(after.count)")
@@ -424,13 +474,13 @@ final class InputInjector {
         return order
     }
 
-    private func post(_ method: SpaceSwitchMethod, right: Bool) {
+    private func post(_ method: SpaceSwitchMethod, right: Bool, spaces: Int) {
         guard method != .missionControlShortcut else {
             postSpaceShortcut(right: right)
             return
         }
         DockSwipe.post(right: right, withPayload: method.carriesPayload,
-                       flick: method.isFlick)
+                       flick: method.isFlick, spaces: spaces)
     }
 
     private func postSpaceShortcut(right: Bool) {
@@ -799,6 +849,9 @@ private enum DockSwipe {
     private static let zoomDeltaX: UInt32 = 139       // required, reason unknown
     private static let sourceProcessAlias: UInt32 = 169
     private static let rawIOHIDPayload: UInt16 = 4205
+    private static let gestureTag: UInt32 = 41        // 33231 on every gesture
+    private static let inverted: UInt32 = 136         // natural direction flag
+    private static let motionAlias: UInt32 = 165
 
     private static let dockControl: Int64 = 30        // kCGSEventDockControl
     private static let gesture: Int64 = 29            // kCGSEventGesture
@@ -808,6 +861,10 @@ private enum DockSwipe {
     private static let changed: Int64 = 2
     private static let ended: Int64 = 4
     private static let cancelled: Int64 = 8
+    private static let gestureTagValue: Int64 = 33231
+    /// The axis, as the packed bits of the smallest float there is: 1 for
+    /// horizontal, 2 for vertical. Fields 119 and 139 both carry it.
+    private static let axisBits = Double(Float(bitPattern: 1))
 
     /// Which part of a swipe an event reports. A cancelled release is how a
     /// trackpad says the fingers gave up, which puts the desktops back.
@@ -831,24 +888,29 @@ private enum DockSwipe {
         }
     }
 
+    /// How much accumulated offset slides the desktops by one whole space. The
+    /// Dock scales a swipe by how many spaces there are to slide past, so the
+    /// same travel means more where there are fewer of them.
+    private static func offsetForOneSpace(spaces: Int) -> Double {
+        spaces <= 1 ? 2.0 : 1.0 + 1.0 / Double(spaces - 1)
+    }
+
     /// Replays a whole swipe with no fingers behind it: began, a run of changed
     /// events, then ended. Each dock-control event travels with the companion
     /// gesture event a trackpad would pair it with.
     ///
-    /// A trackpad reports a swipe as a stream of small steps and the Dock
-    /// slides the desktops along with them — that sliding *is* the transition
-    /// animation. Handing over the whole distance in one event with a large
-    /// release velocity makes the switch happen at once instead, so ramp the
-    /// gesture by default and keep the instant form for systems that ignore a
-    /// gradual one.
-    static func post(right: Bool, withPayload: Bool, flick: Bool) {
+    /// A trackpad reports where a swipe has got to and the Dock slides the
+    /// desktops to match — that sliding *is* the transition animation. Handing
+    /// over the whole distance in one event with a large release speed makes
+    /// the switch happen at once instead, so ramp the gesture by default and
+    /// keep the instant form for systems that ignore a gradual one.
+    static func post(right: Bool, withPayload: Bool, flick: Bool, spaces: Int) {
         let sign: Double = right ? 1 : -1
-        let hair = sign * Double(Float.leastNonzeroMagnitude)
         guard !flick else {
             // A flick needs a fling to carry it the whole way.
             let release = sign * (withPayload ? 9999.0 : 400.0)
             for phase in [Phase.began, .changed, .ended] {
-                send(phase: phase, travel: sign, step: hair, release: release,
+                send(phase: phase, travel: sign, release: release, spaces: spaces,
                      withPayload: withPayload)
             }
             return
@@ -856,67 +918,85 @@ private enum DockSwipe {
         // Twelve steps over ~0.2s: about as long as a real three-finger swipe
         // takes, and slow enough for the slide to be visible.
         let steps = 12
-        send(phase: .began, travel: 0, step: hair, release: 0,
+        send(phase: .began, travel: 0, release: 0, spaces: spaces,
              withPayload: withPayload)
         for step in 1...steps {
             usleep(16_000)
             send(phase: .changed, travel: sign * Double(step) / Double(steps),
-                 step: sign / Double(steps), release: 0, withPayload: withPayload)
+                 release: 0, spaces: spaces, withPayload: withPayload)
         }
-        // A drag that already covered the distance only needs enough release to
-        // settle in the direction it was going.
-        send(phase: .ended, travel: sign, step: hair,
-             release: sign * (withPayload ? 300.0 : 90.0), withPayload: withPayload)
-    }
-
-    /// One event of a swipe that fingers are still making. Pulling them back
-    /// sends negative steps and a shrinking travel, which slides the desktops
-    /// back with them, and a cancelled release returns them to where they were.
-    static func drag(phase: Phase, travel: Double, step: Double, release: Double,
-                     withPayload: Bool) {
-        // A step of exactly zero reads as an unset field, so report the
-        // smallest movement there is instead.
-        let moved = step == 0 ? Double(Float.leastNonzeroMagnitude) : step
-        send(phase: phase, travel: travel, step: moved, release: release,
+        // A swipe that already covered a whole space only needs enough release
+        // speed to settle in the direction it was going.
+        send(phase: .ended, travel: sign,
+             release: sign * (withPayload ? 300.0 : 90.0), spaces: spaces,
              withPayload: withPayload)
     }
 
-    private static func send(phase: Phase, travel: Double, step: Double,
-                             release: Double, withPayload: Bool) {
-        guard let event = make(phase: phase, travel: travel, step: step,
-                               release: release, withPayload: withPayload)
+    /// One event of a swipe that fingers are still making. `travel` is where it
+    /// has got to, in spaces, and `lastStep` how far it moved since the event
+    /// before, which a release turns into the speed the fingers left with.
+    /// Pulling them back shrinks `travel`, so the desktops slide back with
+    /// them, and a cancelled release returns them to where they were.
+    static func drag(phase: Phase, travel: Double, lastStep: Double, spaces: Int,
+                     withPayload: Bool) {
+        var release = 0.0
+        if phase.releasing {
+            // A trackpad reports its exit speed as a hundred times the last
+            // step it saw, which is what carries a short flick the rest of the
+            // way. The macOS 27 encoding wants a much larger number, so give
+            // it the direction and a fixed magnitude.
+            release = withPayload
+                ? (abs(lastStep) < 0.002 ? 0 : (lastStep < 0 ? -300.0 : 300.0))
+                : lastStep * offsetForOneSpace(spaces: spaces) * 100
+        }
+        send(phase: phase, travel: travel, release: release, spaces: spaces,
+             withPayload: withPayload)
+    }
+
+    private static func send(phase: Phase, travel: Double, release: Double,
+                             spaces: Int, withPayload: Bool) {
+        guard let event = make(phase: phase, travel: travel, release: release,
+                               spaces: spaces, withPayload: withPayload)
         else { return }
         event.post(tap: .cgSessionEventTap)
         guard let companion = CGEvent(source: nil) else { return }
         setInt(companion, eventType, gesture)
+        setInt(companion, gestureTag, gestureTagValue)
         companion.post(tap: .cgSessionEventTap)
     }
 
-    /// `travel` is how far the swipe has got in spaces and `step` how far it
-    /// moved since the last event, both positive towards the space on the
-    /// right; `release` is the hand-off velocity, which only a releasing phase
-    /// carries. The two encodings carry travel or step, and disagree about
-    /// which sign means right.
-    private static func make(phase: Phase, travel: Double, step: Double,
-                             release: Double, withPayload: Bool) -> CGEvent? {
+    /// `travel` is where the swipe has got to in spaces, positive towards the
+    /// space on the right, and `release` the speed the fingers left with, which
+    /// only a releasing phase carries.
+    ///
+    /// The legacy encoding reports the running offset twice over — as a double,
+    /// and as the packed bits of the float of the same number — because that
+    /// offset is what the Dock slides the desktops to. Reporting each step on
+    /// its own instead leaves them sitting still until the release flings them,
+    /// which is both invisible and a coin toss. The macOS 27 encoding counts in
+    /// spaces, with the opposite sign.
+    private static func make(phase: Phase, travel: Double, release: Double,
+                             spaces: Int, withPayload: Bool) -> CGEvent? {
         guard let event = CGEvent(source: nil) else { return nil }
         setInt(event, eventType, dockControl)
         setInt(event, hidType, dockSwipeType)
         setInt(event, phaseField, phase.field)
+        setInt(event, phaseAlias, phase.field)
         setInt(event, swipeMotion, horizontal)
 
         guard withPayload else {
-            // This field carries the packed bits of a float: the distance
-            // travelled since the last event. The smallest float there is
-            // stands in for "barely moved", which only switches at all because
-            // of the fling velocity below.
-            let delta = Float(step)
-            setInt(event, scrollFlagBits, Int64(Int32(bitPattern: delta.bitPattern)))
-            setDouble(event, scrollY, 0)
-            setDouble(event, zoomDeltaX, Double(Float.leastNonzeroMagnitude))
+            let offset = travel * offsetForOneSpace(spaces: spaces)
+            setInt(event, gestureTag, gestureTagValue)
+            setInt(event, motionAlias, horizontal)
+            setInt(event, inverted, 0)
+            setDouble(event, swipeProgress, offset)
+            setInt(event, scrollFlagBits,
+                   Int64(Int32(bitPattern: Float(offset).bitPattern)))
+            setDouble(event, scrollY, axisBits)
+            setDouble(event, zoomDeltaX, axisBits)
             if phase.releasing {
                 setDouble(event, velocityX, release)
-                setDouble(event, velocityY, 0)
+                setDouble(event, velocityY, release)
             }
             return event
         }
@@ -924,7 +1004,6 @@ private enum DockSwipe {
         let carried = -travel
         let velocity = phase.releasing ? -release : 0
         setDouble(event, swipeProgress, carried)
-        setInt(event, phaseAlias, phase.field)
         setDouble(event, zoomDeltaY, 3)
         setDouble(event, sourceProcessAlias, Double(mach_absolute_time()))
         setDouble(event, positionX, 0.1)

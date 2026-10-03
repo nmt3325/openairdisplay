@@ -949,9 +949,9 @@ struct VideoLayerView: UIViewRepresentable {
         /// commits a swipe released past half of it, so a switch takes about
         /// twice the threshold above, and everything short of that is a preview
         /// the fingers can still take back.
-        private var spaceDragTravel: CGFloat { max(160, bounds.width * 0.45) }
+        private var spaceDragTravel: CGFloat { max(150, bounds.width * 0.55) }
         /// Movement (points) before a three-finger drag is judged sideways.
-        private let spaceAxisSlop: CGFloat = 12
+        private let spaceAxisSlop: CGFloat = 8
         /// Whether this gesture is being reported to the Mac as it moves, and
         /// whether it was ruled out as a vertical drag.
         private var spaceDragFollowing = false
@@ -1024,7 +1024,7 @@ struct VideoLayerView: UIViewRepresentable {
         /// natural direction, as on the Mac's own trackpad, where pushing the
         /// content left brings in the space to the right.
         private func spaceProgress(_ dx: CGFloat) -> Double {
-            max(-1.5, min(1.5, Double(-dx / spaceDragTravel)))
+            max(-1.0, min(1.0, Double(-dx / spaceDragTravel)))
         }
 
         // MARK: Multi-finger pan

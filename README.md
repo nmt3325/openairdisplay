@@ -565,7 +565,8 @@ Swiping sideways with three fingers switches the Space (desktop) shown on
 that screen, and the desktops follow the fingers: the phone reports how far the
 swipe has travelled as it moves, so sliding slowly slides slowly, pulling back
 slides back, and letting go short of half a desktop of travel snaps back
-without switching. macOS has no public per-display Spaces API, so the Mac app
+without switching — unless the fingers were still moving quickly, which carries
+the switch the rest of the way, exactly as a flick on a trackpad does. macOS has no public per-display Spaces API, so the Mac app
 replays what a trackpad sends, with the pointer parked on the virtual display
 so the system applies it there: a synthetic dock-swipe gesture, with a canned
 version of it, an instant form, and the ⌃← / ⌃→ Mission Control shortcut as
@@ -585,11 +586,14 @@ why it is tried first.
 
 Every swipe says what it did in the Mac log, so none of this has to be guessed
 at. A followed swipe logs `space drag: space 1 of 3` when the fingers start
-moving, then one of `space drag landed via a dock swipe: space 2 of 3`, `space
-drag let go short of the commit distance`, or `space drag had no effect`, which
-replays the swipe through the fallbacks and logs that attempt in turn. With
-*Displays have separate Spaces* off, the log also notes that one space spans
-every screen, which is what makes a per-display switch impossible.
+moving, then either `space drag landed via a dock swipe at 0.62 of a space:
+space 2 of 3` or `space drag stayed put at 0.31 of a space`, both of which say
+how far the swipe had got when the fingers lifted. On a system that has never
+followed a swipe, a release that should have switched logs `space drag had no
+effect: replaying it as a single swipe` and hands the switch to the fallbacks,
+which log their own attempt in turn. With *Displays have separate Spaces* off,
+the log also notes that one space spans every screen, which is what makes a
+per-display switch impossible.
 
 ### Getting the logs for a bug report
 
