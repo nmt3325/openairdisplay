@@ -168,6 +168,13 @@ final class InputInjector {
     /// Release speed, in spaces a second, that commits a swipe however short it
     /// was: the difference between letting go of a drag and flicking it.
     private static let flickSpeed = 1.5
+    /// How long the slide after the fingers lift takes, and how often it is
+    /// reported while it runs. A trackpad settles in about a quarter of a
+    /// second; a slide much quicker than that reads as a jump rather than a
+    /// movement. The shorter the distance left, the shorter the slide.
+    private static let settleFloor = 0.10
+    private static let settlePerSpace = 0.22
+    private static let settleFrame = 0.010
     private lazy var preferredMethod = SpaceSwitchMethod(
         rawValue: UserDefaults.standard.string(forKey: Self.preferredMethodKey) ?? "")
     private lazy var directionIsFlipped =
@@ -402,23 +409,39 @@ final class InputInjector {
     /// to a whole space and ends there, and one that is staying put slides back
     /// to where it started and is cancelled. Same gesture, same result, every
     /// time, and the slide keeps the animation the fingers were drawing.
+    ///
+    /// The slide is paced like an animation rather than run off as fast as the
+    /// events can be posted, and it eases out, so the desktops coast into
+    /// place. It also lands with next to no speed behind it: the travel already
+    /// covers the whole space, and a release the system can still fling on is
+    /// what throws the desktops past the new one and bounces them back.
     private func settleDrag(from travel: Double, committed: Bool, right: Bool) {
         let target = committed ? (right ? 1.0 : -1.0) : 0.0
         let spaces = dragSpaces
         let payload = dragMethod.carriesPayload
         spaceDragQueue.async {
-            let steps = 4
-            let increment = (target - travel) / Double(steps)
+            let distance = target - travel
+            let duration = Self.settleFloor
+                + Self.settlePerSpace * min(1.0, abs(distance))
+            let steps = max(4, Int((duration / Self.settleFrame).rounded()))
+            var posted = travel
             for step in 1...steps {
-                DockSwipe.drag(phase: .changed,
-                               travel: travel + increment * Double(step),
-                               lastStep: increment, spaces: spaces,
+                let fraction = Double(step) / Double(steps)
+                // Fastest where the fingers left off, slowest as it arrives,
+                // which is the curve a trackpad's own settle draws.
+                let eased = 1 - pow(1 - fraction, 3)
+                let position = travel + distance * eased
+                DockSwipe.drag(phase: .changed, travel: position,
+                               lastStep: position - posted, spaces: spaces,
                                withPayload: payload)
-                usleep(12_000)
+                posted = position
+                usleep(useconds_t(Self.settleFrame * 1_000_000))
             }
+            // Enough release to settle in the direction it was going, and not
+            // enough to carry it any further.
             DockSwipe.drag(phase: committed ? .ended : .cancelled, travel: target,
-                           lastStep: committed ? increment : 0, spaces: spaces,
-                           withPayload: payload)
+                           lastStep: committed ? (right ? 0.01 : -0.01) : 0,
+                           spaces: spaces, withPayload: payload)
         }
     }
 
@@ -585,7 +608,9 @@ final class InputInjector {
     /// a single deadline.
     private func settledLayout(differingFrom before: (count: Int, current: Int))
         -> (count: Int, current: Int)? {
-        for _ in 0..<8 {
+        // The slide into the new space takes its time now, so wait long enough
+        // for it to finish before reading anything into the layout.
+        for _ in 0..<12 {
             usleep(100_000)
             if let now = Spaces.layout(of: displayID), now.current != before.current {
                 return now

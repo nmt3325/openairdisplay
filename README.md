@@ -564,9 +564,12 @@ force-quit and reopen the app.
 Swiping sideways with three fingers switches the Space (desktop) shown on
 that screen, and the desktops follow the fingers: the phone reports how far the
 swipe has travelled as it moves, so sliding slowly slides slowly, pulling back
-slides back, and letting go short of half a desktop of travel snaps back
+slides back, and letting go short of half a desktop of travel slides back
 without switching — unless the fingers were still moving quickly, which carries
-the switch the rest of the way, exactly as a flick on a trackpad does. macOS has no public per-display Spaces API, so the Mac app
+the switch the rest of the way, exactly as a flick on a trackpad does. Either
+way the desktops finish the slide at the pace of an animation, easing into
+place rather than snapping to it, and arrive with no speed left to throw them
+past the new desktop. macOS has no public per-display Spaces API, so the Mac app
 replays what a trackpad sends, with the pointer parked on the virtual display
 so the system applies it there: a synthetic dock-swipe gesture, with a canned
 version of it, an instant form, and the ⌃← / ⌃→ Mission Control shortcut as
