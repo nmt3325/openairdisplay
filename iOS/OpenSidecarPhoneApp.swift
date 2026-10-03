@@ -939,14 +939,23 @@ struct VideoLayerView: UIViewRepresentable {
 
         // MARK: Three-finger space switch
 
-        /// One switch per swipe: armed when the third finger lands, spent on
-        /// the first committed direction, rearmed when the fingers lift.
-        private var threeFingerFired = false
         /// Where the swipe started, so a gesture that began as a two-finger
         /// scroll measures from the moment the third finger joined.
         private var spacePanOrigin = CGPoint.zero
-        /// Sideways travel (points) that commits to a space switch.
+        /// Sideways travel (points) that commits to a space switch on a Mac too
+        /// old to follow the gesture, which can only switch all at once.
         private let spaceSwipeThreshold: CGFloat = 50
+        /// Sideways travel (points) standing for one whole desktop. The Mac
+        /// commits a swipe released past half of it, so a switch takes about
+        /// twice the threshold above, and everything short of that is a preview
+        /// the fingers can still take back.
+        private var spaceDragTravel: CGFloat { max(160, bounds.width * 0.45) }
+        /// Movement (points) before a three-finger drag is judged sideways.
+        private let spaceAxisSlop: CGFloat = 12
+        /// Whether this gesture is being reported to the Mac as it moves, and
+        /// whether it was ruled out as a vertical drag.
+        private var spaceDragFollowing = false
+        private var spaceDragRejected = false
 
         /// iPadOS claims three-finger swipes for the undo/redo editing HUD,
         /// and that system gesture outranks anything the app installs — on an
@@ -957,30 +966,65 @@ struct VideoLayerView: UIViewRepresentable {
         private func beginSpacePan(_ recognizer: UIPanGestureRecognizer) {
             twoFingerActive = false
             threeFingerActive = true
-            threeFingerFired = false
+            spaceDragFollowing = false
+            spaceDragRejected = false
             spacePanOrigin = recognizer.translation(in: self)
             stopMomentum()
         }
 
+        /// Three fingers moving sideways: report where they are on every move,
+        /// so the Mac's desktops follow them. Moving slowly slides slowly,
+        /// pulling back slides back, and letting go short of the commit
+        /// distance snaps back without switching.
         private func updateSpacePan(_ recognizer: UIPanGestureRecognizer) {
-            guard !threeFingerFired else { return }
-            let t = recognizer.translation(in: self)
-            let dx = t.x - spacePanOrigin.x
-            let dy = t.y - spacePanOrigin.y
-            // Sideways and clearly so: a three-finger drag heading down is
-            // not a space switch.
-            guard abs(dx) > spaceSwipeThreshold, abs(dx) > abs(dy) * 1.5 else { return }
-            threeFingerFired = true
-            // Natural direction, as on the Mac's own trackpad: pushing the
-            // content left brings in the space to the right.
-            let direction = dx < 0 ? "right" : "left"
-            Log.info("space swipe: \(direction)")
-            receiver?.sendSpaceSwitch(direction: direction)
+            guard !spaceDragRejected else { return }
+            let dx = spacePanTravel(recognizer)
+            if !spaceDragFollowing {
+                let dy = recognizer.translation(in: self).y - spacePanOrigin.y
+                guard max(abs(dx), abs(dy)) > spaceAxisSlop else { return }
+                // Sideways and clearly so: a three-finger drag heading down is
+                // not a space switch.
+                guard abs(dx) > abs(dy) * 1.5 else {
+                    spaceDragRejected = true
+                    return
+                }
+                spaceDragFollowing = true
+                Log.info("space swipe: following the fingers")
+                receiver?.sendSpaceDrag(phase: "began", progress: 0)
+            }
+            receiver?.sendSpaceDrag(phase: "changed", progress: spaceProgress(dx))
         }
 
-        private func endSpacePan() {
+        private func endSpacePan(_ recognizer: UIPanGestureRecognizer,
+                                 cancelled: Bool) {
+            let dx = spacePanTravel(recognizer)
+            if spaceDragFollowing {
+                receiver?.sendSpaceDrag(phase: cancelled ? "cancelled" : "ended",
+                                        progress: spaceProgress(dx))
+            }
+            // A Mac too old to follow the gesture knows one message for the
+            // whole swipe, so it gets one when the fingers lift.
+            if !cancelled, !spaceDragRejected, receiver?.macFollowsSpaceDrag == false,
+               abs(dx) > spaceSwipeThreshold {
+                let direction = dx < 0 ? "right" : "left"
+                Log.info("space swipe: \(direction)")
+                receiver?.sendSpaceSwitch(direction: direction)
+            }
             threeFingerActive = false
-            threeFingerFired = false
+            spaceDragFollowing = false
+            spaceDragRejected = false
+        }
+
+        /// Sideways distance since the third finger landed.
+        private func spacePanTravel(_ recognizer: UIPanGestureRecognizer) -> CGFloat {
+            recognizer.translation(in: self).x - spacePanOrigin.x
+        }
+
+        /// Travel in desktops, positive towards the space on the right: the
+        /// natural direction, as on the Mac's own trackpad, where pushing the
+        /// content left brings in the space to the right.
+        private func spaceProgress(_ dx: CGFloat) -> Double {
+            max(-1.5, min(1.5, Double(-dx / spaceDragTravel)))
         }
 
         // MARK: Multi-finger pan
@@ -1007,13 +1051,13 @@ struct VideoLayerView: UIViewRepresentable {
                 }
             case .ended:
                 if threeFingerActive {
-                    endSpacePan()
+                    endSpacePan(recognizer, cancelled: false)
                 } else {
                     endScrollPan(coast: true, recognizer: recognizer)
                 }
             default:
                 if threeFingerActive {
-                    endSpacePan()
+                    endSpacePan(recognizer, cancelled: true)
                 } else {
                     endScrollPan(coast: false, recognizer: recognizer)
                 }

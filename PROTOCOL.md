@@ -255,6 +255,7 @@ Coordinates use the conventions of section 7.
 | `touch` | pv 1 | `phase`, `x`, `y`, `t`? | Finger input |
 | `scroll` | pv 1 | `dx`, `dy` | Two-finger scroll |
 | `spaceSwitch` | pv 3 (additive) | `direction` | Three-finger swipe: switch this display's space |
+| `spaceDrag` | pv 3 (additive) | `phase`, `progress` | The same swipe, reported as it moves |
 | `pencil` | pv 3 | `phase`, `x`, `y`, `pressure`, `azimuth`, `altitude`, `rotation`, `t`? | Stylus input |
 | `proximity` | pv 3 | `entering`, `x`, `y` | Stylus hover enter/leave |
 | `kf` | pv 1 | none | Request an IDR (section 5.3) |
@@ -341,6 +342,21 @@ requires "Displays have separate Spaces" to be on to stay scoped to that
 display. Senders older than this message ignore the unknown type, so the
 gesture simply does nothing.
 
+**`spaceDrag`** (pv 3, additive) carries `phase` (string): `"began"`,
+`"changed"`, `"ended"`, or `"cancelled"`; and `progress` (number): how far
+the swipe has travelled, in spaces, where 1 is a whole desktop and positive
+means towards the space on the right, in the same natural-swipe terms as
+`spaceSwitch`. It reports one three-finger swipe as it happens, so a sender
+can slide the desktops with the fingers, follow them back when they reverse,
+and treat a release short of the commit distance as no switch at all. Magnitude
+MAY exceed 1 where the gesture overshoots. A sender MAY ignore the type and
+act on `spaceSwitch` alone.
+
+A receiver that sends both MUST NOT let one swipe switch twice. The reference
+receiver always streams `spaceDrag` and sends `spaceSwitch` on release only
+while no `spaceDragOK` (section 6.2) has arrived on this connection, so a
+sender that follows the gesture never sees the one-shot message.
+
 **`pencil`** (pv 3) carries `phase` (string): `"down"`, `"move"`, `"up"`,
 or `"hover"`; `x`, `y`: normalized position; `pressure` (number): 0 to 1;
 `azimuth`, `altitude` (numbers): stylus orientation in radians (altitude
@@ -384,6 +400,7 @@ section 4.
 | `updateRequired` | pv 2 | `target`, `store`, `message` | Peer must update to continue |
 | `streamConfig` | pv 3 (additive) | `codec`, `width`, `height`, `framesPerSecond` | Selected video operating point |
 | `power` | pv 3 (additive) | `action` | Ask the receiver to power off (6.6) |
+| `spaceDragOK` | pv 3 (additive) | none | This sender follows `spaceDrag` (6.1) |
 
 **`pong`** echoes the `t` from the receiver's `ping` unchanged and adds
 `mt`: milliseconds since the Unix epoch on the sender's clock at the moment
@@ -813,6 +830,7 @@ Mechanics at a glance (the policy behind them lives in COMPATIBILITY.md):
 | 3 (additive) | `hello.power` and `power` (6.6); direct cable only |
 | 3 (additive) | `hello.panel` (6.7); `pixelsWide/High/scale` deprecated, removed at the next bump |
 | 3 (additive) | `spaceSwitch` (6.1); unknown to older senders, which ignore it |
+| 3 (additive) | `spaceDrag` and its `spaceDragOK` acknowledgement (6.1, 6.2); receivers fall back to `spaceSwitch` for senders without it |
 | 4 (reserved) | Typed frame header replacing the section 4 demux heuristic (two-phase migration) |
 
 ---
