@@ -2,7 +2,7 @@
   "_comment": "OpenAirDisplay-only update policy. Keep the hard floor dormant unless a deliberate compatibility break requires it.",
   "ios": {
     "hardMinimumVersion": "0.0.0",
-    "recommendedVersion": "1.25.18",
+    "recommendedVersion": "1.25.19",
     "storeURL": "https://github.com/nmt3325/openairdisplay/releases/latest",
     "message": "A newer OpenAirDisplay IPA is available on GitHub. Re-sign it before installing."
   }
