@@ -335,17 +335,17 @@ fingers lift (trackpad-style momentum): the wire has no gesture or momentum
 phase, so a glide is indistinguishable from slow scrolling, and a sender
 needs no special handling for it.
 
-**\`magnify\`** (pv 3, additive) carries \`phase\` (\`"began"\`,
-\`"changed"\`, \`"ended"\`, or \`"cancelled"\`), \`magnification\` (number),
-and \`x\`/\`y\` (normalized [0,1] focal coordinates in video space).
-\`magnification\` is the signed **incremental** logarithm of the scale
+**`magnify`** (pv 3, additive) carries `phase` (`"began"`,
+`"changed"`, `"ended"`, or `"cancelled"`), `magnification` (number),
+and `x`/`y` (normalized [0,1] focal coordinates in video space).
+`magnification` is the signed **incremental** logarithm of the scale
 change since the preceding sample, not the cumulative pinch scale.
 A sender SHOULD inject the gesture into the app under the focal point and
 SHOULD honor the begin/change/end sequence. The reference macOS sender
 uses private CGS magnification fields (subject to OS compatibility).
 Older senders safely ignore the message.
 
-**\`spaceSwitch\`** (pv 3, additive) carries `direction` (string): `"left"`
+**`spaceSwitch`** (pv 3, additive) carries `direction` (string): `"left"`
 or `"right"` — which neighbouring space (macOS virtual desktop) to move
 to, in natural-swipe terms, for **the display this session drives**. Sent
 once per three-finger swipe. A sender MAY ignore it: macOS exposes no
