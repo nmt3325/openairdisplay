@@ -409,7 +409,7 @@ struct SettingsView: View {
                           systemImage: "wifi")
                     Label("Rotate the \(deviceKind) for a vertical second monitor.",
                           systemImage: "rotate.right")
-                    Label("Touch: tap to click, drag to drag, two-finger pan to scroll (it keeps gliding), three-finger swipe to switch this screen's desktop.",
+                    Label("Touch: tap to click, drag to drag, two-finger pan to scroll, two-finger pinch to zoom, three-finger swipe to switch this screen's desktop.",
                           systemImage: "hand.tap")
                 } header: {
                     Text("How to connect")
@@ -724,10 +724,9 @@ struct VideoLayerView: UIViewRepresentable {
         view.addGestureRecognizer(pan)
         view.spacePan = pan
 
-        // Three fingers pinching: in for Launchpad, out to leave it again. It
-        // shares its fingers with the pan above, so both recognizers have to be
-        // allowed to see them — otherwise whichever recognized first would take
-        // the gesture away from the other.
+        // Two fingers pinch to magnify content in the Mac app; three fingers
+        // pinch to open/leave Launchpad. The pan and pinch must recognize
+        // simultaneously, then arbitrate whether to scroll, zoom, or switch spaces.
         let pinch = UIPinchGestureRecognizer(
             target: view, action: #selector(VideoView.didPinch(_:)))
         pinch.delegate = view
@@ -1075,27 +1074,36 @@ struct VideoLayerView: UIViewRepresentable {
             Double(-recognizer.velocity(in: self).x / spaceDragTravel)
         }
 
-        // MARK: Three-finger pinch
+        // MARK: Two-finger magnification / three-finger Launchpad
 
-        /// How far three fingers have to close, or open, before the pinch counts
-        /// — as a share of how far apart they started.
         private let launchpadPinchIn: CGFloat = 0.8
         private let launchpadPinchOut: CGFloat = 1.25
-        /// Launchpad is opened or left once per pinch, however far it carries on.
         private var pinchHasFired = false
-        /// The most fingers the pinch has ever had. A finger that drifts out of
-        /// the recognizer's reckoning mid-pinch should not turn a three-finger
-        /// gesture into a two-finger one halfway through.
         private var pinchTouchPeak = 0
-        /// Logged once per pinch, so a gesture that never reaches the Mac can
-        /// be told apart from one the Mac did nothing with.
         private var pinchLogged = false
 
-        /// Three fingers pinching: in opens Launchpad, out leaves it. Two
-        /// fingers are a scroll, not a pinch, so they are left alone here.
-        /// How many fingers this pinch has, counted wherever they can be seen.
+        /// A pinch is a continuous Mac magnification, not a viewport transform
+        /// on the phone. Keep the two-finger stream distinct from Launchpad.
+        private let zoomStartSlop = 0.035  // log(scale), about 3.5% movement
+        private var twoFingerPinchActive = false
+        private var pinchPreviousScale: CGFloat = 1
+        private var pinchLocation: (x: Double, y: Double) = (0.5, 0.5)
+        /// Once UIKit has recognized a pinch, do not send simultaneous scroll
+        /// deltas or coast on pan release, even if pinch ends before pan does.
+        private var pinchSuppressesScroll = false
+
+        /// UIPinchGestureRecognizer tracks two touches even when three are on
+        /// the glass. The shared pan can see the third touch before it recognizes.
         private func pinchFingers(_ recognizer: UIPinchGestureRecognizer) -> Int {
             max(recognizer.numberOfTouches, spacePan?.numberOfTouches ?? 0)
+        }
+
+        private func finishTwoFingerPinch(cancelled: Bool) {
+            guard twoFingerPinchActive else { return }
+            receiver?.sendMagnify(phase: cancelled ? "cancelled" : "ended",
+                                  magnification: 0,
+                                  x: pinchLocation.x, y: pinchLocation.y)
+            twoFingerPinchActive = false
         }
 
         @objc func didPinch(_ recognizer: UIPinchGestureRecognizer) {
@@ -1104,33 +1112,77 @@ struct VideoLayerView: UIViewRepresentable {
                 pinchHasFired = false
                 pinchLogged = false
                 pinchTouchPeak = pinchFingers(recognizer)
+                twoFingerPinchActive = false
+                pinchPreviousScale = 1
+                pinchSuppressesScroll = pinchTouchPeak == 2
+                if pinchSuppressesScroll { stopMomentum() }
+
             case .changed:
                 pinchTouchPeak = max(pinchTouchPeak, pinchFingers(recognizer))
-                guard !pinchHasFired, pinchTouchPeak >= 3 else { return }
-                if !pinchLogged {
-                    pinchLogged = true
-                    Log.info("three-finger pinch: watching it"
-                             + " (\(pinchTouchPeak) fingers)")
-                }
-                let show: Bool
-                if recognizer.scale <= launchpadPinchIn {
-                    show = true
-                } else if recognizer.scale >= launchpadPinchOut {
-                    show = false
-                } else {
+                if pinchTouchPeak >= 3 {
+                    // A third finger joined: never leave a magnify sequence
+                    // open on the Mac or reinterpret it as a two-finger zoom.
+                    finishTwoFingerPinch(cancelled: true)
+                    pinchSuppressesScroll = false
+                    guard !pinchHasFired else { return }
+                    if !pinchLogged {
+                        pinchLogged = true
+                        Log.info("three-finger pinch: watching it"
+                                 + " (\(pinchTouchPeak) fingers)")
+                    }
+                    let show: Bool
+                    if recognizer.scale <= launchpadPinchIn {
+                        show = true
+                    } else if recognizer.scale >= launchpadPinchOut {
+                        show = false
+                    } else {
+                        return
+                    }
+                    pinchHasFired = true
+                    cancelSpaceDrag()
+                    Log.info(show ? "three-finger pinch in: Launchpad"
+                                  : "three-finger pinch out: leaving Launchpad")
+                    receiver?.sendLaunchpad(show: show)
                     return
                 }
-                pinchHasFired = true
-                // These fingers are pinching, whatever the pan recognizer made
-                // of them on the way, so no desktop goes anywhere.
-                cancelSpaceDrag()
-                Log.info(show ? "three-finger pinch in: Launchpad"
-                              : "three-finger pinch out: leaving Launchpad")
-                receiver?.sendLaunchpad(show: show)
-            default:
+
+                guard pinchTouchPeak == 2,
+                      recognizer.scale > 0, recognizer.scale.isFinite,
+                      let location = normalized(recognizer.location(in: self))
+                else { return }
+                pinchLocation = location
+                let scale = Double(recognizer.scale)
+                if !twoFingerPinchActive {
+                    // Allow a newly landing third finger to join before sending
+                    // any two-finger zoom. UIPan may have already begun, so
+                    // also cancel its scroll momentum on commitment.
+                    guard abs(log(scale)) >= zoomStartSlop else { return }
+                    twoFingerPinchActive = true
+                    pinchSuppressesScroll = true
+                    stopMomentum()
+                    Log.info("two-finger pinch: magnifying Mac content")
+                    receiver?.sendMagnify(phase: "began", magnification: 0,
+                                          x: location.x, y: location.y)
+                }
+                // UIKit scale is cumulative from the pinch's start; macOS
+                // expects incremental magnification for each changed event.
+                let step = log(scale / Double(pinchPreviousScale))
+                pinchPreviousScale = recognizer.scale
+                if step.isFinite && abs(step) > 0.0001 {
+                    receiver?.sendMagnify(phase: "changed",
+                                          magnification: min(0.2, max(-0.2, step)),
+                                          x: location.x, y: location.y)
+                }
+
+            case .ended, .cancelled, .failed:
+                finishTwoFingerPinch(cancelled: recognizer.state != .ended)
+                if !twoFingerActive { pinchSuppressesScroll = false }
                 pinchHasFired = false
                 pinchLogged = false
                 pinchTouchPeak = 0
+                pinchPreviousScale = 1
+            default:
+                break
             }
         }
 
@@ -1206,6 +1258,9 @@ struct VideoLayerView: UIViewRepresentable {
             guard let video = receiver?.videoSize, video != .zero else { return }
             let t = recognizer.translation(in: self)
             let scale = min(bounds.width / video.width, bounds.height / video.height)
+            // A recognized pinch owns these two fingers. No scroll should
+            // leak through while they are changing distance.
+            guard !pinchSuppressesScroll else { lastPan = t; return }
             // Deltas in video pixels, natural-scrolling direction.
             receiver?.sendScroll(dx: (t.x - lastPan.x) / scale,
                                  dy: (t.y - lastPan.y) / scale)
@@ -1215,11 +1270,12 @@ struct VideoLayerView: UIViewRepresentable {
         private func endScrollPan(coast: Bool, recognizer: UIPanGestureRecognizer) {
             twoFingerActive = false
             // Let go and it coasts, same as lifting off a trackpad.
-            if coast {
+            if coast && !pinchSuppressesScroll {
                 startMomentum(velocity: recognizer.velocity(in: self))
             } else {
                 stopMomentum()
             }
+            pinchSuppressesScroll = false
         }
 
         // A press is only a click once we know a second finger is not coming.

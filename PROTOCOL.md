@@ -254,6 +254,7 @@ Coordinates use the conventions of section 7.
 | `ping` | pv 1 | `t` | Liveness + clock sync probe |
 | `touch` | pv 1 | `phase`, `x`, `y`, `t`? | Finger input |
 | `scroll` | pv 1 | `dx`, `dy` | Two-finger scroll |
+| `magnify` | pv 3 (additive) | `phase`, `magnification`, `x`, `y` | Two-finger pinch, continuous app zoom |
 | `spaceSwitch` | pv 3 (additive) | `direction` | Three-finger swipe: switch this display's space |
 | `spaceDrag` | pv 3 (additive) | `phase`, `progress`, `velocity` | The same swipe, reported as it moves |
 | `missionControl` | pv 3 (additive) | `action` | Three fingers up or down: Mission Control, or leaving it |
@@ -333,6 +334,16 @@ moves down). The receiver MAY keep sending decaying deltas after the
 fingers lift (trackpad-style momentum): the wire has no gesture or momentum
 phase, so a glide is indistinguishable from slow scrolling, and a sender
 needs no special handling for it.
+
+**`magnify`** (pv 3, additive) carries `phase` (`"began"`,
+`"changed"`, `"ended"`, or `"cancelled"`), `magnification` (number),
+and `x`/`y` (normalized [0,1] focal coordinates in video space).
+`magnification` is the signed **incremental** logarithm of the scale
+change since the preceding sample, not the cumulative pinch scale.
+A sender SHOULD inject the gesture into the app under the focal point and
+SHOULD honor the begin/change/end sequence. The reference macOS sender
+uses private CGS magnification fields (subject to OS compatibility).
+Older senders safely ignore the message.
 
 **`spaceSwitch`** (pv 3, additive) carries `direction` (string): `"left"`
 or `"right"` — which neighbouring space (macOS virtual desktop) to move
