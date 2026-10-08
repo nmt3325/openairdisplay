@@ -1163,9 +1163,14 @@ final class StreamReceiver: ObservableObject {
         sendControl(msg)
     }
 
-    /// Two-finger scroll: dx/dy in video pixels (natural-scrolling sign).
-    func sendScroll(dx: Double, dy: Double) {
-        sendControl(["type": "scroll", "dx": dx, "dy": dy])
+    /// Horizontal/vertical trackpad-style scroll in video pixels.
+    /// Optional phases are backward-compatible with legacy Mac senders.
+    func sendScroll(dx: Double, dy: Double, phase: String? = nil,
+                    momentumPhase: String? = nil) {
+        var msg: [String: Any] = ["type": "scroll", "dx": dx, "dy": dy]
+        if let phase { msg["phase"] = phase }
+        if let momentumPhase { msg["momentumPhase"] = momentumPhase }
+        sendControl(msg)
     }
 
     /// Two-finger pinch: one continuous magnification sequence.

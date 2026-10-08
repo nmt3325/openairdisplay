@@ -888,6 +888,7 @@ struct VideoLayerView: UIViewRepresentable {
         /// Hard stop, so a hard flick cannot scroll for a quarter of a minute.
         private let momentumMaxDuration: CFTimeInterval = 1.6
         private var momentumVelocity = CGPoint.zero
+        private var scrollPhaseActive = false
         private var momentumLink: CADisplayLink?
         private var momentumLastTimestamp: CFTimeInterval = 0
         private var momentumElapsed: CFTimeInterval = 0
@@ -898,6 +899,7 @@ struct VideoLayerView: UIViewRepresentable {
         private func startMomentum(velocity: CGPoint) {
             stopMomentum()
             guard hypot(velocity.x, velocity.y) > momentumMinVelocity else { return }
+            receiver?.sendScroll(dx: 0, dy: 0, momentumPhase: "began")
             momentumVelocity = velocity
             momentumElapsed = 0
             momentumLastTimestamp = 0
@@ -908,10 +910,21 @@ struct VideoLayerView: UIViewRepresentable {
 
         /// Any new contact cancels the glide — catching a moving list is the
         /// one thing that must never lag.
-        private func stopMomentum() {
+        private func stopMomentum(cancelled: Bool = true) {
+            if momentumLink != nil {
+                receiver?.sendScroll(dx: 0, dy: 0,
+                                     momentumPhase: cancelled ? "cancelled" : "ended")
+            }
             momentumLink?.invalidate()
             momentumLink = nil
             momentumVelocity = .zero
+        }
+
+        private func finishFingerScroll(cancelled: Bool) {
+            guard scrollPhaseActive else { return }
+            scrollPhaseActive = false
+            receiver?.sendScroll(dx: 0, dy: 0,
+                                 phase: cancelled ? "cancelled" : "ended")
         }
 
         /// A live display link retains this view, so a glide that outlives the
@@ -919,7 +932,10 @@ struct VideoLayerView: UIViewRepresentable {
         /// receiver and leak the view.
         override func willMove(toWindow newWindow: UIWindow?) {
             super.willMove(toWindow: newWindow)
-            if newWindow == nil { stopMomentum() }
+            if newWindow == nil {
+                finishFingerScroll(cancelled: true)
+                stopMomentum()
+            }
         }
 
         @objc private func stepMomentum(_ link: CADisplayLink) {
@@ -939,7 +955,8 @@ struct VideoLayerView: UIViewRepresentable {
 
             let scale = min(bounds.width / video.width, bounds.height / video.height)
             receiver?.sendScroll(dx: Double(momentumVelocity.x * CGFloat(dt) / scale),
-                                 dy: Double(momentumVelocity.y * CGFloat(dt) / scale))
+                                 dy: Double(momentumVelocity.y * CGFloat(dt) / scale),
+                                 momentumPhase: "changed")
 
             // Decay per elapsed second, not per frame: a 120Hz device has to
             // coast exactly as far as a 60Hz one.
@@ -948,7 +965,7 @@ struct VideoLayerView: UIViewRepresentable {
             momentumVelocity.y *= decay
             if hypot(momentumVelocity.x, momentumVelocity.y) < momentumMinVelocity / 4
                 || momentumElapsed > momentumMaxDuration {
-                stopMomentum()
+                stopMomentum(cancelled: false)
             }
         }
 
@@ -988,6 +1005,7 @@ struct VideoLayerView: UIViewRepresentable {
             // The pan may have switched from two fingers to three in place.
             // Abandon any pending scroll without allowing it to coast.
             _ = twoFingerGesture.endPan(coast: false)
+            finishFingerScroll(cancelled: true)
             threeFingerActive = true
             spaceDragFollowing = false
             spaceDragVertical = false
@@ -1164,6 +1182,7 @@ struct VideoLayerView: UIViewRepresentable {
                     guard abs(log(scale)) >= zoomStartSlop else { return }
                     twoFingerPinchActive = true
                     twoFingerGesture.commitZoom()
+                    finishFingerScroll(cancelled: true)
                     stopMomentum()
                     Log.info("two-finger pinch: magnifying Mac content")
                     receiver?.sendMagnify(phase: "began", magnification: 0,
@@ -1258,6 +1277,8 @@ struct VideoLayerView: UIViewRepresentable {
                 lastNorm = n
                 receiver?.sendTouch(phase: "moved", x: n.x, y: n.y)
             }
+            scrollPhaseActive = true
+            receiver?.sendScroll(dx: 0, dy: 0, phase: "began")
         }
 
         private func updateScrollPan(_ recognizer: UIPanGestureRecognizer) {
@@ -1269,14 +1290,16 @@ struct VideoLayerView: UIViewRepresentable {
             guard twoFingerGesture.allowsScroll else { lastPan = t; return }
             // Deltas in video pixels, natural-scrolling direction.
             receiver?.sendScroll(dx: (t.x - lastPan.x) / scale,
-                                 dy: (t.y - lastPan.y) / scale)
+                                 dy: (t.y - lastPan.y) / scale, phase: "changed")
             lastPan = t
         }
 
         private func endScrollPan(coast: Bool, recognizer: UIPanGestureRecognizer) {
             twoFingerActive = false
             // Let go and it coasts, same as lifting off a trackpad.
-            if twoFingerGesture.endPan(coast: coast) {
+            let shouldCoast = twoFingerGesture.endPan(coast: coast)
+            finishFingerScroll(cancelled: !coast || !shouldCoast)
+            if shouldCoast {
                 startMomentum(velocity: recognizer.velocity(in: self))
             } else {
                 stopMomentum()
