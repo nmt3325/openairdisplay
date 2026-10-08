@@ -1,0 +1,36 @@
+# One-shot trigger; removed after the release and update feeds are verified.
+name: Publish installed fork version
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/publish-fork-version.yml
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  dispatch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch stable v1.25.0-air.17
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=v1.25.0-air.17
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" >/dev/null 2>&1; then
+            echo "::notice::Release $tag already exists"
+            exit 0
+          fi
+          gh workflow run fork-release.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f source_sha="$GITHUB_SHA" \
+            -f app_version=1.25.0 \
+            -f release_tag="$tag" \
+            -f publish=true \
+            -f prerelease=false
+          echo "::notice::Dispatched $tag from $GITHUB_SHA"
