@@ -1,0 +1,37 @@
+# One-shot dispatcher for the tested scroll-momentum regression fix.
+# Removed after the signed stable release and feeds are verified.
+name: Publish kinetic scrolling fix
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/publish-kinetic-fix.yml
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  dispatch-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch signed stable release v1.25.0-air.16
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=v1.25.0-air.16
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" >/dev/null 2>&1; then
+            echo "::notice::Release $tag already exists."
+            exit 0
+          fi
+          gh workflow run fork-release.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f source_sha="$GITHUB_SHA" \
+            -f app_version=1.25.0 \
+            -f release_tag="$tag" \
+            -f publish=true \
+            -f prerelease=false
+          echo "::notice::Dispatched $tag from $GITHUB_SHA"
