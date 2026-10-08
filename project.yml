@@ -164,6 +164,7 @@ targets:
       - Mac/Log.swift
       - Mac/LogPolicies.swift
       - Shared/Protocol.swift
+      - Shared/ScrollGesturePhase.swift
       - Shared/AppVersion.swift
       - Shared/TwoFingerGestureState.swift
       - Shared/DirectCable.swift

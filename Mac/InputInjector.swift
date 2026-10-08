@@ -146,9 +146,18 @@ final class InputInjector {
         event.post(tap: .cghidEventTap)
     }
 
-    /// dx/dy in display pixels, natural-scrolling sign from the phone.
-    /// Scroll events take points, so convert via the display's pixel scale.
-    func handleScroll(dx: Double, dy: Double) {
+    /// Real trackpads supply scroll phases as well as dx/dy. Preserve them
+    /// for every destination app, instead of globally mapping lateral swipes
+    /// to back/forward shortcuts (which breaks horizontally scrollable views).
+    /// Synthetic CGEvents may still lack HID touches needed by browser history.
+    func handleScroll(dx: Double, dy: Double, phase: String? = nil,
+                      momentumPhase: String? = nil) {
+        guard dx.isFinite, dy.isFinite, abs(dx) <= 200_000, abs(dy) <= 200_000 else { return }
+        let fingerPhase = phase.flatMap(ScrollGesturePhase.init(rawValue:))
+        let inertiaPhase = momentumPhase.flatMap(ScrollGesturePhase.init(rawValue:))
+        guard (phase == nil || fingerPhase != nil),
+              (momentumPhase == nil || inertiaPhase != nil),
+              fingerPhase == nil || inertiaPhase == nil else { return }
         let bounds = CGDisplayBounds(displayID)
         let scale = bounds.width > 0 ? Double(CGDisplayPixelsWide(displayID)) / bounds.width : 2
         guard let event = CGEvent(scrollWheelEvent2Source: source, units: .pixel,
@@ -156,6 +165,15 @@ final class InputInjector {
                                   wheel1: Int32((dy / scale).rounded()),
                                   wheel2: Int32((dx / scale).rounded()),
                                   wheel3: 0) else { return }
+        if let fingerPhase {
+            event.setIntegerValueField(.scrollWheelEventScrollPhase, value: fingerPhase.cgValue)
+        }
+        if let inertiaPhase {
+            event.setIntegerValueField(.scrollWheelEventMomentumPhase, value: inertiaPhase.cgValue)
+        }
+        if fingerPhase != nil || inertiaPhase != nil {
+            event.setIntegerValueField(.scrollWheelEventIsContinuous, value: 1)
+        }
         event.post(tap: .cghidEventTap)
     }
 
