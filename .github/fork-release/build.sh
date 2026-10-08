@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 platform="${1:?Specify macOS or iOS}"
-: "${APP_VERSION:?}" "${APP_BUILD_NUMBER:?}" "${SOURCE_SHA:?}"
+: "${APP_VERSION:?}" "${APP_BUILD_NUMBER:?}" "${SOURCE_SHA:?}" "${RELEASE_TAG:?}"
 [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
 [[ "$APP_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
 [[ "$(git rev-parse HEAD)" == "$SOURCE_SHA" ]]
 test -f Shared/PeerToPeerWiFi.swift
 git grep -q 'includePeerToPeer' -- Shared/StreamReceiver.swift
 mkdir -p dist
+fork_version="$(python3 .github/fork-release/versioning.py "$APP_VERSION" "$RELEASE_TAG")"
+export FORK_VERSION="$fork_version"
 short_sha="${SOURCE_SHA:0:7}"
 suffix="${APP_VERSION}-${short_sha}"
 derived="$PWD/DerivedData-${platform}"
 {
   echo "Repository: ${GITHUB_REPOSITORY}"
   echo "Source commit: ${SOURCE_SHA}"
-  echo "App version: ${APP_VERSION} (${APP_BUILD_NUMBER})"
+  echo "Fork release: ${RELEASE_TAG}"
+  echo "Bundle version: ${fork_version} (${APP_BUILD_NUMBER})"
+  echo "Upstream version: ${APP_VERSION}"
   echo "Platform: ${platform}"
   echo "Workflow: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
   echo "Build time (UTC): $(date -u +%FT%TZ)"
@@ -26,7 +30,8 @@ derived="$PWD/DerivedData-${platform}"
 # The fork has its own feed, EdDSA key, bundle IDs and persistent signing identity.
 xcodegen generate
 common=(-project OpenSidecar.xcodeproj -derivedDataPath "$derived")
-common+=(MARKETING_VERSION="$APP_VERSION" CURRENT_PROJECT_VERSION="$APP_BUILD_NUMBER")
+common+=(MARKETING_VERSION="$fork_version" CURRENT_PROJECT_VERSION="$APP_BUILD_NUMBER")
+common+=(OPENAIRDISPLAY_RELEASE_TAG="$RELEASE_TAG" OPENAIRDISPLAY_UPSTREAM_VERSION="$APP_VERSION")
 common+=(CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="")
 run_xcode() {
   local name="$1"; shift
@@ -75,7 +80,9 @@ import os, plistlib, sys
 from pathlib import Path
 path = Path(sys.argv[1]) / 'Contents/Info.plist'
 info = plistlib.loads(path.read_bytes())
-assert info['CFBundleShortVersionString'] == os.environ['APP_VERSION']
+assert info['CFBundleShortVersionString'] == os.environ['FORK_VERSION']
+assert info['OpenAirDisplayReleaseTag'] == os.environ['RELEASE_TAG']
+assert info['OpenAirDisplayUpstreamVersion'] == os.environ['APP_VERSION']
 assert info['CFBundleVersion'] == os.environ['APP_BUILD_NUMBER']
 assert '_opensidecar._tcp' in info['NSBonjourServices']
 import json
@@ -105,7 +112,7 @@ assert len(base64.b64decode(signature,validate=True))==64
 info=plistlib.loads((Path(sys.argv[3])/'Contents/Info.plist').read_bytes())
 p=Path('dist/MAC-UPDATES.json'); rows=json.loads(p.read_text()) if p.exists() else []
 rows.append({'asset':archive.name,'signature':signature,'length':archive.stat().st_size,
- 'bundleID':info['CFBundleIdentifier'],'version':os.environ['APP_VERSION'],
+ 'bundleID':info['CFBundleIdentifier'],'version':os.environ['FORK_VERSION'],
  'buildNumber':os.environ['APP_BUILD_NUMBER'],'minimumSystemVersion':info['LSMinimumSystemVersion'],
  'sourceSHA':os.environ['SOURCE_SHA']})
 p.write_text(json.dumps(rows,indent=2)+'\n')
@@ -124,7 +131,9 @@ path = Path(sys.argv[1]) / 'Info.plist'
 info = plistlib.loads(path.read_bytes())
 config = json.load(open('.github/fork-release/config.json'))
 assert info['CFBundleIdentifier'] == config['bundleIDs']['ios'], info['CFBundleIdentifier']
-assert info['CFBundleShortVersionString'] == os.environ['APP_VERSION']
+assert info['CFBundleShortVersionString'] == os.environ['FORK_VERSION']
+assert info['OpenAirDisplayReleaseTag'] == os.environ['RELEASE_TAG']
+assert info['OpenAirDisplayUpstreamVersion'] == os.environ['APP_VERSION']
 assert info['CFBundleVersion'] == os.environ['APP_BUILD_NUMBER']
 assert 'iPhoneOS' in info['CFBundleSupportedPlatforms']
 assert info['UIDeviceFamily'] == [1, 2]
