@@ -2388,9 +2388,7 @@ final class MacSender: NSObject, SCStreamOutput, SCStreamDelegate {
             }
         case "scroll":
             if let dx = obj["dx"] as? Double, let dy = obj["dy"] as? Double {
-                inputInjector?.handleScroll(dx: dx, dy: dy,
-                                            phase: obj["phase"] as? String,
-                                            momentumPhase: obj["momentumPhase"] as? String)
+                inputInjector?.handleScroll(dx: dx, dy: dy)
             }
         case "magnify":
             if let phase = obj["phase"] as? String,
