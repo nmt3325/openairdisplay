@@ -159,6 +159,44 @@ final class InputInjector {
         event.post(tap: .cghidEventTap)
     }
 
+    /// Forward the actual two-finger magnify event to the app below the cursor.
+    /// AppKit turns a CGS gesture (type 29, HID zoom subtype 8) into its
+    /// NSEventTypeMagnify. These fields are undocumented, like DockSwipe below.
+    /// A keyboard shortcut would lose continuous zoom and app-specific handling.
+    private var magnifyActive = false
+
+    func handleMagnify(phase: String, magnification: Double, x: Double, y: Double) {
+        guard x.isFinite, y.isFinite, magnification.isFinite,
+              (0...1).contains(x), (0...1).contains(y),
+              abs(magnification) <= 0.5 else { return }
+        let bounds = CGDisplayBounds(displayID)
+        let point = CGPoint(x: bounds.minX + x * bounds.width,
+                            y: bounds.minY + y * bounds.height)
+        switch phase {
+        case "began":
+            if magnifyActive {
+                DockSwipe.magnify(phase: .cancelled, delta: 0, at: point)
+            }
+            magnifyActive = true
+            // Native magnification is dispatched to the app under the cursor.
+            CGWarpMouseCursorPosition(point)
+            DockSwipe.magnify(phase: .began, delta: 0, at: point)
+            // A zero-delta changed event primes apps that otherwise delay
+            // responding until the second magnification sample.
+            DockSwipe.magnify(phase: .changed, delta: 0, at: point)
+        case "changed":
+            guard magnifyActive else { return }
+            DockSwipe.magnify(phase: .changed, delta: magnification, at: point)
+        case "ended", "cancelled":
+            guard magnifyActive else { return }
+            magnifyActive = false
+            DockSwipe.magnify(phase: phase == "ended" ? .ended : .cancelled,
+                              delta: 0, at: point)
+        default:
+            break
+        }
+    }
+
     // Which injection method is known to work on this machine, and whether it
     // reports swipe direction inverted. Both differ by macOS version and are
     // cheaper to discover at runtime than to predict.
@@ -1039,6 +1077,7 @@ private enum SpaceSwitchMethod: String {
 private enum DockSwipe {
     private static let eventType: UInt32 = 55         // kCGSEventTypeField
     private static let hidType: UInt32 = 110          // kCGEventGestureHIDType
+    private static let magnificationField: UInt32 = 113 // kCGEventGestureZoomValue
     private static let scrollY: UInt32 = 119
     private static let swipeMotion: UInt32 = 123      // horizontal vs vertical
     private static let swipeProgress: UInt32 = 124
@@ -1059,6 +1098,7 @@ private enum DockSwipe {
     private static let dockControl: Int64 = 30        // kCGSEventDockControl
     private static let gesture: Int64 = 29            // kCGSEventGesture
     private static let dockSwipeType: Int64 = 23      // kIOHIDEventTypeDockSwipe
+    private static let zoomType: Int64 = 8           // kIOHIDEventTypeZoom
     private static let horizontal: Int64 = 1          // kCGGestureMotionHorizontal
     private static let began: Int64 = 1
     private static let changed: Int64 = 2
@@ -1089,6 +1129,19 @@ private enum DockSwipe {
             case .began, .changed: return false
             }
         }
+    }
+
+    /// AppKit interprets a CGS gesture of HID subtype zoom as a magnify event.
+    /// Use the same private CoreGraphics setters as our existing dock swipes.
+    /// Input is an incremental magnification, not an absolute scale.
+    static func magnify(phase: Phase, delta: Double, at point: CGPoint) {
+        guard let event = CGEvent(source: nil) else { return }
+        setInt(event, eventType, gesture)
+        setInt(event, hidType, zoomType)
+        setInt(event, phaseField, phase.field)
+        setDouble(event, magnificationField, delta)
+        event.location = point
+        event.post(tap: .cghidEventTap)
     }
 
     /// How much accumulated offset slides the desktops by one whole space. The

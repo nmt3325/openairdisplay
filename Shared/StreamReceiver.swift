@@ -1168,6 +1168,14 @@ final class StreamReceiver: ObservableObject {
         sendControl(["type": "scroll", "dx": dx, "dy": dy])
     }
 
+    /// Two-finger pinch: one continuous magnification sequence.
+    /// magnification is the signed incremental log(scale), not cumulative;
+    /// x/y locate the focal point in normalized video space.
+    func sendMagnify(phase: String, magnification: Double, x: Double, y: Double) {
+        sendControl(["type": "magnify", "phase": phase,
+                     "magnification": magnification, "x": x, "y": y])
+    }
+
     /// Three-finger horizontal swipe: switch the Mac-side space (virtual
     /// desktop) of the display this device is showing. direction is
     /// "left" or "right"; older Macs ignore the unknown type.
