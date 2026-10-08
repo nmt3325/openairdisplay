@@ -61,6 +61,9 @@ jobs:
           # off that same base (v1.25.0-air.2). The upstream number never moves
           # for a revision: there is no such upstream release to point at.
           [[ "$tag" == "v$version-air" || "$tag" =~ ^v${version//./\\.}-air\.([2-9]|[1-9][0-9]+)$ ]]
+          python3 -m unittest discover -s .github/fork-release -p "test_versioning.py"
+          fork_version="$(python3 .github/fork-release/versioning.py "$version" "$tag")"
+          echo "Fork bundle version: $fork_version"
           echo "source_sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "app_version=$version" >> "$GITHUB_OUTPUT"
           echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
@@ -88,6 +91,7 @@ jobs:
       - name: Build, sign and verify release artifacts
         env:
           APP_VERSION: ${{ needs.prepare.outputs.app_version }}
+          RELEASE_TAG: ${{ needs.prepare.outputs.release_tag }}
           APP_BUILD_NUMBER: ${{ github.run_number }}
           SOURCE_SHA: ${{ needs.prepare.outputs.source_sha }}
           PLATFORM: ${{ matrix.platform }}

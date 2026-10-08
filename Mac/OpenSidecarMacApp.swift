@@ -964,6 +964,9 @@ struct ContentView: View {
                     Text("Your iPads, iPhones and Macs as extra displays")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    Text(AppVersion().display)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
                 Spacer()
                 if controller.running {

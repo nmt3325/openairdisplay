@@ -339,9 +339,7 @@ struct SettingsView: View {
     @AppStorage("metalRenderer") private var metalRenderer = false
     // This fork is sideloaded, so there is no App Store listing to rate.
 
-    private var version: String {
-        Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "dev"
-    }
+    private let version = AppVersion()
 
     var body: some View {
         AdaptiveNavigation {
@@ -424,7 +422,9 @@ struct SettingsView: View {
                 }
 
                 Section("About") {
-                    LabeledRow("Version", value: version)
+                    LabeledRow("OpenAirDisplay", value: version.display)
+                    LabeledRow("Installed version", value: version.marketing)
+                    LabeledRow("Upstream OpenDisplay", value: version.upstreamDisplay)
                     Link(destination: ForkUpdates.repositoryURL) {
                         Label("GitHub — nmt3325/openairdisplay", systemImage: "link")
                     }

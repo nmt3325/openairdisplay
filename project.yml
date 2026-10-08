@@ -39,6 +39,8 @@ settings:
     # the GitHub Actions run number (monotonic, keeps TestFlight builds unique).
     MARKETING_VERSION: "0.0.0"
     CURRENT_PROJECT_VERSION: "1"
+    OPENAIRDISPLAY_RELEASE_TAG: "dev"
+    OPENAIRDISPLAY_UPSTREAM_VERSION: "0.0.0"
 targets:
   OpenSidecarMac:
     type: application
@@ -56,6 +58,8 @@ targets:
         CFBundleDisplayName: $(BUNDLE_DISPLAY_NAME)
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        OpenAirDisplayReleaseTag: "$(OPENAIRDISPLAY_RELEASE_TAG)"
+        OpenAirDisplayUpstreamVersion: "$(OPENAIRDISPLAY_UPSTREAM_VERSION)"
         LSUIElement: true
         NSLocalNetworkUsageDescription: OpenAirDisplay connects to your iPad or iPhone over the local network in WiFi mode.
         NSBonjourServices: ["_opensidecar._tcp"]
@@ -119,6 +123,8 @@ targets:
         CFBundleDisplayName: $(BUNDLE_DISPLAY_NAME)
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        OpenAirDisplayReleaseTag: "$(OPENAIRDISPLAY_RELEASE_TAG)"
+        OpenAirDisplayUpstreamVersion: "$(OPENAIRDISPLAY_UPSTREAM_VERSION)"
         NSLocalNetworkUsageDescription: OpenAirDisplay Receiver advertises itself on the local network so another Mac can connect and use this Mac as a display.
         NSBonjourServices: ["_opensidecar._tcp"]
         NSAppleEventsUsageDescription: OpenDisplay Receiver shuts this Mac down when the connected Mac asks it to.
@@ -158,6 +164,7 @@ targets:
       - Mac/Log.swift
       - Mac/LogPolicies.swift
       - Shared/Protocol.swift
+      - Shared/AppVersion.swift
       - Shared/TwoFingerGestureState.swift
       - Shared/DirectCable.swift
       - Shared/LogSnapshot.swift
@@ -191,6 +198,8 @@ targets:
         CFBundleIconName: AppIcon
         CFBundleShortVersionString: "$(MARKETING_VERSION)"
         CFBundleVersion: "$(CURRENT_PROJECT_VERSION)"
+        OpenAirDisplayReleaseTag: "$(OPENAIRDISPLAY_RELEASE_TAG)"
+        OpenAirDisplayUpstreamVersion: "$(OPENAIRDISPLAY_UPSTREAM_VERSION)"
         UILaunchScreen: {}
         UIRequiresFullScreen: true
         NSLocalNetworkUsageDescription: OpenAirDisplay advertises itself on the local network so your Mac can connect over WiFi.

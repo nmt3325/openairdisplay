@@ -5,6 +5,18 @@ PR even when the answer is "not affected" or "no mobile release required."
 The goal is to know which existing installations were tested and whether users
 must update one app, both peers, or neither.
 
+## Fork release and installed bundle version
+
+For `v1.25.0-air.17` based on OpenDisplay `1.25.0`, the IPA and macOS
+apps use numeric `CFBundleShortVersionString=1.25.17` and a monotonically
+increasing `CFBundleVersion`. LiveContainer reads the numeric installed
+version; SideStore requires its source `version` to match the IPA version.
+The in-app OpenAirDisplay version display includes the `-air.17` tag and
+build number, and labels the upstream OpenDisplay version separately.
+Never put `-air` into the bundle short version. The numeric version is
+derived by `.github/fork-release/versioning.py` with 1000 fork revisions
+reserved per upstream patch.
+
 ## What the release workflow publishes
 
 Merging an ordinary change into `main` updates the release-please PR. Merging
