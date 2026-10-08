@@ -253,7 +253,7 @@ Coordinates use the conventions of section 7.
 | `hello` | pv 1 | `pixelsWide`, `pixelsHigh`, `scale`, `device`?, `id`?, `pv`?, `displayMaxFrameRate`?, `videoCaps`?, `panel`? | Identify the panel and receiver video capabilities; (re)sent on connect and on rotation |
 | `ping` | pv 1 | `t` | Liveness + clock sync probe |
 | `touch` | pv 1 | `phase`, `x`, `y`, `t`? | Finger input |
-| `scroll` | pv 1 (optional phases additive) | `dx`, `dy`, `phase`?, `momentumPhase`? | Native horizontal/vertical scroll and momentum |
+| `scroll` | pv 1 | `dx`, `dy` | Two-finger scroll |
 | `magnify` | pv 3 (additive) | `phase`, `magnification`, `x`, `y` | Two-finger pinch, continuous app zoom |
 | `spaceSwitch` | pv 3 (additive) | `direction` | Three-finger swipe: switch this display's space |
 | `spaceDrag` | pv 3 (additive) | `phase`, `progress`, `velocity` | The same swipe, reported as it moves |
@@ -327,24 +327,13 @@ stamping, so the sender can compute input latency without its own sync).
 Senders MUST tolerate an absent `t` (it is omitted until the offset is
 known).
 
-**`scroll`** carries `dx`, `dy` (numbers): horizontal and vertical
-scroll deltas in **video pixels** (section 7), with **natural-scrolling sign**.
-Optional, additive `phase` and `momentumPhase` fields use `"began"`,
-`"changed"`, `"ended"`, `"cancelled"`. Exactly one of these phase fields
-may be present. Finger scroll uses `phase`; kinetic continuation after a
-finger lift uses `momentumPhase`. Zero-delta begin/end messages delimit the
-gesture. New senders SHOULD preserve the corresponding AppKit scroll/momentum
-phase flags and let the destination app interpret the gesture. A legacy
-sender safely ignores the optional fields; a legacy receiver can still send
-unphased `scroll` messages.
-
-**Limit:** A synthetic CGEvent scroll, even with phase flags, does not
-contain real trackpad `NSTouch` contacts. Safari/Chromium may require genuine
-HID touch data to activate back/forward history swipes. This protocol
-preserves generic app-specific horizontal scrolling but does **not**
-guarantee browser history navigation without a real virtual-trackpad input
-path. Do not unconditionally convert lateral scrolling into keyboard
-back/forward shortcuts, which would break horizontally scrollable content.
+**`scroll`** carries `dx`, `dy` (numbers): scroll deltas in **video
+pixels** (section 7) with **natural-scrolling sign** (content follows the
+fingers: fingers moving down produce positive `dy` and the scrolled content
+moves down). The receiver MAY keep sending decaying deltas after the
+fingers lift (trackpad-style momentum): the wire has no gesture or momentum
+phase, so a glide is indistinguishable from slow scrolling, and a sender
+needs no special handling for it.
 
 **`magnify`** (pv 3, additive) carries `phase` (`"began"`,
 `"changed"`, `"ended"`, or `"cancelled"`), `magnification` (number),
