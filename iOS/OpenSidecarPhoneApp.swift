@@ -985,6 +985,9 @@ struct VideoLayerView: UIViewRepresentable {
 
         private func beginSpacePan(_ recognizer: UIPanGestureRecognizer) {
             twoFingerActive = false
+            // The pan may have switched from two fingers to three in place.
+            // Abandon any pending scroll without allowing it to coast.
+            _ = twoFingerGesture.endPan(coast: false)
             threeFingerActive = true
             spaceDragFollowing = false
             spaceDragVertical = false
@@ -1088,9 +1091,10 @@ struct VideoLayerView: UIViewRepresentable {
         private var twoFingerPinchActive = false
         private var pinchPreviousScale: CGFloat = 1
         private var pinchLocation: (x: Double, y: Double) = (0.5, 0.5)
-        /// Once UIKit has recognized a pinch, do not send simultaneous scroll
-        /// deltas or coast on pan release, even if pinch ends before pan does.
-        private var pinchSuppressesScroll = false
+        /// Keep two-finger pan and pinch recognizer lifetimes independent:
+        /// UIKit may recognize both on a normal swipe, but only a pinch that
+        /// actually crosses the zoom threshold suppresses scroll/momentum.
+        private var twoFingerGesture = TwoFingerGestureState()
 
         /// UIPinchGestureRecognizer tracks two touches even when three are on
         /// the glass. The shared pan can see the third touch before it recognizes.
@@ -1114,8 +1118,9 @@ struct VideoLayerView: UIViewRepresentable {
                 pinchTouchPeak = pinchFingers(recognizer)
                 twoFingerPinchActive = false
                 pinchPreviousScale = 1
-                pinchSuppressesScroll = pinchTouchPeak == 2
-                if pinchSuppressesScroll { stopMomentum() }
+                // Recognizer activation alone isn't a zoom. Ordinary two-finger
+                // scrolling can activate both recognizers simultaneously.
+                twoFingerGesture.beginPinch()
 
             case .changed:
                 pinchTouchPeak = max(pinchTouchPeak, pinchFingers(recognizer))
@@ -1123,7 +1128,7 @@ struct VideoLayerView: UIViewRepresentable {
                     // A third finger joined: never leave a magnify sequence
                     // open on the Mac or reinterpret it as a two-finger zoom.
                     finishTwoFingerPinch(cancelled: true)
-                    pinchSuppressesScroll = false
+                    twoFingerGesture.cancelForThreeFingerGesture()
                     guard !pinchHasFired else { return }
                     if !pinchLogged {
                         pinchLogged = true
@@ -1158,7 +1163,7 @@ struct VideoLayerView: UIViewRepresentable {
                     // also cancel its scroll momentum on commitment.
                     guard abs(log(scale)) >= zoomStartSlop else { return }
                     twoFingerPinchActive = true
-                    pinchSuppressesScroll = true
+                    twoFingerGesture.commitZoom()
                     stopMomentum()
                     Log.info("two-finger pinch: magnifying Mac content")
                     receiver?.sendMagnify(phase: "began", magnification: 0,
@@ -1176,7 +1181,7 @@ struct VideoLayerView: UIViewRepresentable {
 
             case .ended, .cancelled, .failed:
                 finishTwoFingerPinch(cancelled: recognizer.state != .ended)
-                if !twoFingerActive { pinchSuppressesScroll = false }
+                twoFingerGesture.endPinch()
                 pinchHasFired = false
                 pinchLogged = false
                 pinchTouchPeak = 0
@@ -1240,6 +1245,7 @@ struct VideoLayerView: UIViewRepresentable {
 
         private func beginScrollPan(_ recognizer: UIPanGestureRecognizer) {
             twoFingerActive = true
+            twoFingerGesture.beginPan()
             lastPan = recognizer.translation(in: self)
             stopMomentum()
             // macOS delivers scroll to whatever sits under the cursor, and
@@ -1260,7 +1266,7 @@ struct VideoLayerView: UIViewRepresentable {
             let scale = min(bounds.width / video.width, bounds.height / video.height)
             // A recognized pinch owns these two fingers. No scroll should
             // leak through while they are changing distance.
-            guard !pinchSuppressesScroll else { lastPan = t; return }
+            guard twoFingerGesture.allowsScroll else { lastPan = t; return }
             // Deltas in video pixels, natural-scrolling direction.
             receiver?.sendScroll(dx: (t.x - lastPan.x) / scale,
                                  dy: (t.y - lastPan.y) / scale)
@@ -1270,12 +1276,11 @@ struct VideoLayerView: UIViewRepresentable {
         private func endScrollPan(coast: Bool, recognizer: UIPanGestureRecognizer) {
             twoFingerActive = false
             // Let go and it coasts, same as lifting off a trackpad.
-            if coast && !pinchSuppressesScroll {
+            if twoFingerGesture.endPan(coast: coast) {
                 startMomentum(velocity: recognizer.velocity(in: self))
             } else {
                 stopMomentum()
             }
-            pinchSuppressesScroll = false
         }
 
         // A press is only a click once we know a second finger is not coming.
@@ -1322,7 +1327,12 @@ struct VideoLayerView: UIViewRepresentable {
             // and end the click if another finger joins mid-press.
             if twoFingerActive || threeFingerActive
                 || (event?.allTouches?.filter { isFinger($0) }.count ?? 1) > 1 {
-                stopMomentum()
+                // UIKit can deliver touchesEnded *after* the pan recognizer
+                // has launched momentum. Finger lifts aren't new contact and
+                // must not immediately cancel that glide.
+                if TwoFingerGestureState.touchShouldStopMomentum(phase) {
+                    stopMomentum()
+                }
                 if downSent {
                     receiver?.sendTouch(phase: "cancelled", x: lastNorm.x, y: lastNorm.y)
                 }
