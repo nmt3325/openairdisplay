@@ -1,0 +1,40 @@
+# One-shot dispatch of the verified pinch-to-zoom build as the stable channel.
+# This workflow is intentionally scoped to changes to this file only. Remove
+# the workflow after the release and the update feeds have been verified.
+name: Publish pinch-to-zoom stable release
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/publish-pinch-release.yml
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  dispatch-stable-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch signed release v1.25.0-air.15
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=v1.25.0-air.15
+          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" >/dev/null 2>&1; then
+            echo "::notice::Release $tag exists, no duplicate dispatch."
+            exit 0
+          fi
+          # The existing, tested release workflow signs binaries, verifies
+          # signatures, publishes assets, then commits Sparkle and iOS feeds.
+          gh workflow run fork-release.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref main \
+            -f source_sha="$GITHUB_SHA" \
+            -f app_version=1.25.0 \
+            -f release_tag="$tag" \
+            -f publish=true \
+            -f prerelease=false
+          echo "::notice::Dispatched stable $tag from commit $GITHUB_SHA"
