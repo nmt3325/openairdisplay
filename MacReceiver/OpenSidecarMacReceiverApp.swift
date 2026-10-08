@@ -151,6 +151,9 @@ struct ReceiverContentView: View {
                     Text("This Mac as an extra display for another Mac")
                         .font(.caption)
                         .foregroundColor(.secondary)
+                    Text(AppVersion().display)
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
                 }
                 Spacer()
             }
