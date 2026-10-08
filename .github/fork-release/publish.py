@@ -24,6 +24,7 @@ import zipfile
 from datetime import datetime, timezone
 from email.utils import format_datetime
 from pathlib import Path
+from versioning import marketing_version
 
 import ed25519
 
@@ -110,6 +111,7 @@ def environment():
     # releases/latest and the fixed download URLs resolve to — only moves when
     # a build is deliberately published as one.
     # An unset value counts as a pre-release, which is what a tag push sends.
+    env['FORK_VERSION'] = marketing_version(env['APP_VERSION'], env['RELEASE_TAG'])
     env['PRERELEASE'] = ('false'
                          if os.environ.get('PRERELEASE', '').strip().lower() == 'false'
                          else 'true')
@@ -406,7 +408,9 @@ def check_mac_archive(path, role, row, env):
                   for name in names), label + ': Sparkle.framework is missing')
         info = plistlib.loads(archive.read(app + '/Contents/Info.plist'))
         expected = {'CFBundleIdentifier': identifier,
-                    'CFBundleShortVersionString': env['APP_VERSION'],
+                    'CFBundleShortVersionString': env['FORK_VERSION'],
+                     'OpenAirDisplayReleaseTag': env['RELEASE_TAG'],
+                     'OpenAirDisplayUpstreamVersion': env['APP_VERSION'],
                     'CFBundleVersion': env['APP_BUILD_NUMBER'],
                     'SUFeedURL': feed_url(role),
                     'SUPublicEDKey': CONFIG['sparklePublicKey']}
@@ -445,7 +449,9 @@ def check_ios_archive(path, env):
               label + ': it still carries a provisioning profile')
         info = plistlib.loads(archive.read(app + 'Info.plist'))
         expected = {'CFBundleIdentifier': CONFIG['bundleIDs']['ios'],
-                    'CFBundleShortVersionString': env['APP_VERSION'],
+                    'CFBundleShortVersionString': env['FORK_VERSION'],
+                     'OpenAirDisplayReleaseTag': env['RELEASE_TAG'],
+                     'OpenAirDisplayUpstreamVersion': env['APP_VERSION'],
                     'CFBundleVersion': env['APP_BUILD_NUMBER']}
         for key, value in expected.items():
             check(info.get(key) == value, '%s: %s is %r, expected %r'
@@ -545,7 +551,7 @@ def verify_update_rows(assets, env, names):
               name + ': the update row records length ' + str(row['length']))
         check(row['bundleID'] == CONFIG['bundleIDs'][role],
               name + ': the update row names bundle ID ' + row['bundleID'])
-        check(row['version'] == env['APP_VERSION'],
+        check(row['version'] == env['FORK_VERSION'],
               name + ': the update row says version ' + row['version'])
         check(row['buildNumber'] == env['APP_BUILD_NUMBER'],
               name + ': the update row says build ' + row['buildNumber'])
@@ -782,14 +788,14 @@ def verify_published_assets(env, uploads, workspace):
 def appcast_item(env, role, row, asset):
     product = 'OpenAirDisplay' if role == 'mac' else 'OpenAirDisplay Receiver'
     item = ET.Element('item')
-    ET.SubElement(item, 'title').text = product + ' ' + env['APP_VERSION']
+    ET.SubElement(item, 'title').text = product + ' ' + env['RELEASE_TAG']
     ET.SubElement(item, 'link').text = GITHUB + REPO + '/releases/tag/' + env['RELEASE_TAG']
     ET.SubElement(item, '{%s}version' % SPARKLE_NS).text = env['APP_BUILD_NUMBER']
-    ET.SubElement(item, '{%s}shortVersionString' % SPARKLE_NS).text = env['APP_VERSION']
+    ET.SubElement(item, '{%s}shortVersionString' % SPARKLE_NS).text = env['FORK_VERSION']
     ET.SubElement(item, '{%s}minimumSystemVersion' % SPARKLE_NS).text = \
         row['minimumSystemVersion']
     ET.SubElement(item, 'description').text = (
-        '<p>' + product + ' ' + env['APP_VERSION'] + ' (build '
+        '<p>' + product + ' ' + env['RELEASE_TAG'] + ' (build '
         + env['APP_BUILD_NUMBER'] + '). Release notes: '
         + GITHUB + REPO + '/releases/tag/' + env['RELEASE_TAG'] + '</p>')
     ET.SubElement(item, 'pubDate').text = format_datetime(datetime.now(timezone.utc))
@@ -824,11 +830,11 @@ def render_appcast(path, env, role, row, asset):
 
 def altstore_version(env, ios):
     tag = env['RELEASE_TAG']
-    return {'version': env['APP_VERSION'],
+    return {'version': env['FORK_VERSION'],
             'buildVersion': env['APP_BUILD_NUMBER'],
             'date': datetime.now(timezone.utc).replace(microsecond=0)
                     .isoformat().replace('+00:00', 'Z'),
-            'localizedDescription': 'OpenAirDisplay ' + env['APP_VERSION']
+            'localizedDescription': 'OpenAirDisplay ' + env['RELEASE_TAG']
                                     + ' (build ' + env['APP_BUILD_NUMBER']
                                     + '). Release notes: ' + GITHUB + REPO
                                     + '/releases/tag/' + tag,
@@ -857,7 +863,7 @@ def feed_changes(env, names, rows, ios):
         render_appcast(ROOT / FEEDS[role], env, role, rows[role], names[role])
     manifest = ROOT / IOS_MANIFEST
     data = json.loads(manifest.read_text())
-    data['ios']['recommendedVersion'] = env['APP_VERSION']
+    data['ios']['recommendedVersion'] = env['FORK_VERSION']
     data['ios']['storeURL'] = GITHUB + REPO + '/releases/latest'
     manifest.write_text(json.dumps(data, indent=2) + '\n')
     render_altstore_source(ROOT / ALTSTORE_SOURCE, env, ios)
