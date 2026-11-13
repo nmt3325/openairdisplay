@@ -157,10 +157,14 @@ targets:
     sources:
       - MacTests
       - Mac/DisplayArrangement.swift
+      - Mac/OriginRestore.swift
       - Mac/StreamConfiguration.swift
       - Mac/VirtualCanvasSizing.swift
       - Mac/PhoneInfo.swift
       - Mac/DesktopPolicy.swift
+      - Mac/CaptureSourceCheck.swift
+      - Mac/AndroidUSBFunction.swift
+      - Mac/USBAccessory.swift
       - Mac/Log.swift
       - Mac/LogPolicies.swift
       - Shared/Protocol.swift
@@ -171,6 +175,7 @@ targets:
       - Shared/AppStore.swift
       - Shared/ForkPreferences.swift
       - MacReceiver/FullscreenPreference.swift
+      - iOS/ReceiverPanelGeometry.swift
     settings:
       base:
         # A hostless test bundle: the sources under test are compiled straight
@@ -201,7 +206,11 @@ targets:
         OpenAirDisplayReleaseTag: "$(OPENAIRDISPLAY_RELEASE_TAG)"
         OpenAirDisplayUpstreamVersion: "$(OPENAIRDISPLAY_UPSTREAM_VERSION)"
         UILaunchScreen: {}
+        # Full screen on iPadOS 26 and earlier, as before. From iOS 27 the
+        # app follows its window instead (an iPhone Duo's Split View, iPadOS
+        # 27 multitasking); the receiver reports whatever window it gets.
         UIRequiresFullScreen: true
+        UIRequiresFullScreenIgnoredStartingWithVersion: "27"
         NSLocalNetworkUsageDescription: OpenAirDisplay advertises itself on the local network so your Mac can connect over WiFi.
         NSBonjourServices: ["_opensidecar._tcp"]
         UISupportedInterfaceOrientations:

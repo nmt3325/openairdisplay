@@ -18,7 +18,7 @@ on:
       release_tag:
         description: New release tag (upstream version + -air, plus .2, .3 ... for a fork revision)
         required: true
-        default: v1.25.0-air.2
+        default: v1.30.2-air
         type: string
       publish:
         description: Publish release and update feeds after verification
@@ -69,16 +69,32 @@ jobs:
           echo "release_tag=$tag" >> "$GITHUB_OUTPUT"
   build:
     needs: prepare
-    runs-on: macos-26
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        platform: [macOS, iOS]
+        include:
+          - platform: macOS
+            runner: macos-26
+          # Same as upstream's build-ios job: the iOS SDK decides how the app
+          # lays out on iPhone Duo, and only the 27.1 SDK uses the full inner
+          # and outer displays (upstream #446, #448). macos-26 tops out at
+          # Xcode 26.x, so iOS builds on the Xcode 27 image with Xcode pinned.
+          - platform: iOS
+            runner: xcode-27
+            developer_dir: /Applications/Xcode_27.1.app/Contents/Developer
     steps:
       - uses: actions/checkout@v6
         with:
           ref: ${{ needs.prepare.outputs.source_sha }}
           persist-credentials: false
+      - name: Pin Xcode
+        if: matrix.developer_dir != ''
+        env:
+          PINNED_DEVELOPER_DIR: ${{ matrix.developer_dir }}
+        run: |
+          test -d "$PINNED_DEVELOPER_DIR"
+          echo "DEVELOPER_DIR=$PINNED_DEVELOPER_DIR" >> "$GITHUB_ENV"
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Import persistent signing identity and update key

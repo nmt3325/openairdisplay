@@ -139,7 +139,10 @@ assert 'iPhoneOS' in info['CFBundleSupportedPlatforms']
 assert info['UIDeviceFamily'] == [1, 2]
 assert '_opensidecar._tcp' in info['NSBonjourServices']
 assert not (path.parent / 'embedded.mobileprovision').exists()
-print({k:info.get(k) for k in ('CFBundleIdentifier','CFBundleShortVersionString','CFBundleVersion','MinimumOSVersion','UIDeviceFamily')})
+# iPhone Duo only gets the full inner/outer displays with the iOS 27.1 SDK.
+sdk = tuple(int(x) for x in info['DTPlatformVersion'].split('.')[:2])
+assert sdk >= (27, 1), f"built with iOS SDK {info['DTPlatformVersion']}, need 27.1+"
+print({k:info.get(k) for k in ('CFBundleIdentifier','CFBundleShortVersionString','CFBundleVersion','MinimumOSVersion','UIDeviceFamily','DTSDKName')})
 PY
     executable=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app/Info.plist")
     lipo "$app/$executable" -verify_arch arm64
